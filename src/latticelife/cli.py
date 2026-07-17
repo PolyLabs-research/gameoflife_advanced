@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import signal
 import sys
+import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -18,6 +20,7 @@ from latticelife.config import Config, load_config
 from latticelife.core.geometries import max_degree
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
+from latticelife.discovery.worker import DiscoveryWorker
 from latticelife.logging import log_event
 from latticelife.recording.recorder import Recorder
 from latticelife.session.session import SimulationSession
@@ -38,6 +41,13 @@ def _build_parser() -> argparse.ArgumentParser:
     autorun.add_argument("--shape", choices=(*SHAPES, "random"), default="random")
     autorun.add_argument("--db", type=Path, default=None)
     autorun.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+
+    discover = subparsers.add_parser(
+        "discover", help="Run the (mu+lambda) ES worker in the foreground."
+    )
+    discover.add_argument("--minutes", type=float, default=60.0)
+    discover.add_argument("--shape", choices=SHAPES, default="square")
+    discover.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
 
     return parser
 
@@ -111,6 +121,27 @@ def run_autorun(args: argparse.Namespace) -> dict:
     return summary
 
 
+def run_discover(args: argparse.Namespace) -> None:
+    """Runs the ES worker in the foreground for up to `--minutes`, with signal-based clean
+    shutdown: SIGINT sets the worker's stop event instead of killing the process outright."""
+    config = load_config(args.config)
+    worker = DiscoveryWorker(config, shape=args.shape)
+
+    def handle_sigint(signum: int, frame: object) -> None:
+        worker.stop()
+
+    previous_handler = signal.signal(signal.SIGINT, handle_sigint)
+    worker.start()
+    try:
+        deadline = time.monotonic() + args.minutes * 60
+        while worker.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.5)
+    finally:
+        worker.stop()
+        worker.join(timeout=10)
+        signal.signal(signal.SIGINT, previous_handler)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -118,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "autorun":
             print(json.dumps(run_autorun(args)))
+        elif args.command == "discover":
+            run_discover(args)
         return 0
     except Exception as exc:
         log_event("app", level="error", event="unhandled_exception", error=str(exc))

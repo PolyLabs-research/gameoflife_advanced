@@ -23,6 +23,7 @@ class LatticeGrid:
         wrap: bool,
         triangle_mode: str = "edge+vertex",
         static_threshold: int = 10,
+        adjacency: np.ndarray | None = None,
     ) -> None:
         self.lifeforms = lifeforms
         self.shape = shape
@@ -32,7 +33,12 @@ class LatticeGrid:
         self.triangle_mode = triangle_mode
         self.static_threshold = static_threshold
 
-        self.adjacency = build_adjacency(shape, width, height, wrap, triangle_mode)
+        # A caller building a twin grid (e.g. damage spreading, §6.12) can pass an existing
+        # adjacency array to share it read-only rather than rebuilding an identical one.
+        if adjacency is not None:
+            self.adjacency = adjacency
+        else:
+            self.adjacency = build_adjacency(shape, width, height, wrap, triangle_mode)
 
         n_cells = width * height
         self.occupancy = np.zeros(n_cells, dtype=np.int8)  # 0 = empty, 1..L = lifeform id
@@ -126,3 +132,21 @@ class LatticeGrid:
             static[lf.id] = int(np.sum(alive_mask & (self.lifespans > self.static_threshold)))
 
         return UpdateResult(births, deaths, kills, alive, static, changed_cells)
+
+
+def clone_grid(grid: LatticeGrid) -> LatticeGrid:
+    """A twin grid for damage spreading (§6.12): shares `grid`'s adjacency array read-only
+    (never rebuilt or deep-copied) with independently cloned occupancy/lifespans state."""
+    twin = LatticeGrid(
+        grid.lifeforms,
+        grid.shape,
+        grid.width,
+        grid.height,
+        grid.wrap,
+        grid.triangle_mode,
+        grid.static_threshold,
+        adjacency=grid.adjacency,
+    )
+    twin.occupancy = grid.occupancy.copy()
+    twin.lifespans = grid.lifespans.copy()
+    return twin

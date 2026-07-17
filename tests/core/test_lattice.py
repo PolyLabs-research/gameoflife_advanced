@@ -3,7 +3,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from latticelife.core.lattice import LatticeGrid
+from latticelife.core.lattice import LatticeGrid, clone_grid
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
 
@@ -126,3 +126,20 @@ def test_determinism_property_across_seeds(seed):
     occ_b, life_b = _run_trajectory(seed=seed, steps=5)
     assert np.array_equal(occ_a, occ_b)
     assert np.array_equal(life_a, life_b)
+
+
+def test_clone_grid_shares_adjacency_and_copies_state():
+    grid = LatticeGrid([Lifeform(1, CONWAY)], "square", 6, 6, wrap=True)
+    grid.occupancy[0] = 1
+    grid.lifespans[0] = 5
+
+    twin = clone_grid(grid)
+
+    assert twin.adjacency is grid.adjacency  # shared read-only, never rebuilt or deep-copied
+    assert twin.occupancy is not grid.occupancy
+    assert twin.lifespans is not grid.lifespans
+    assert np.array_equal(twin.occupancy, grid.occupancy)
+    assert np.array_equal(twin.lifespans, grid.lifespans)
+
+    twin.occupancy[1] = 1  # mutating the twin must not affect the original
+    assert grid.occupancy[1] == 0
