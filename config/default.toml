@@ -1,0 +1,82 @@
+[grid]
+shape = "square"            # square | hexagon | triangle
+width = 50
+height = 50
+wrap = true
+triangle_mode = "edge+vertex"   # edge | edge+vertex
+
+[simulation]
+initial_alive_percentage = 0.5
+n_lifeforms = 1
+static_threshold = 10       # lifespan above which a cell counts as static
+history_limit = 300
+seed = 0                    # 0 = draw fresh entropy; nonzero = reproducible
+
+[metrics]
+cluster_stride = 10         # compute cluster metrics every N generations (1 = every gen)
+
+[alerts]
+sudden_death_window = 10
+sudden_death_drop = 0.8
+stasis_occupancy = 0.80
+stasis_volatility = 5.0
+
+[recording]
+db_path = "out/latticelife.db"
+batch_size = 1000
+
+[discovery]
+mu = 5                      # elites carried forward
+n_offspring = 15            # the lambda in (mu+lambda)
+evals_per_candidate = 3
+grid_size = 64
+steps = 200
+p_birth = 0.3
+p_survive = 0.3
+mutation_rate = 0.08        # per-bit flip probability, Rule.mutate semantics
+save_threshold = 0.8
+checkpoint_path = "out/discovery"
+
+[criticality]
+# band thresholds and weights, values as in legacy criticality_score.py
+rho_std_scale = 0.1
+act_std_scale = 0.05
+freeze_penalty_weight = 0.5
+
+[criticality.alive_band]
+low = 0.0
+high = 0.6
+target_low = 0.05
+target_high = 0.40
+
+[criticality.activity_band]
+low = 0.0
+high = 0.2
+target_low = 0.005
+target_high = 0.05
+
+[criticality.damage_band]
+low = 0.0
+high = 0.8
+target_low = 0.1
+target_high = 0.4
+
+[criticality.damage_growth_band]
+low = -0.05
+high = 0.6
+target_low = 0.02
+target_high = 0.2
+
+[criticality.weights]
+alive = 0.3
+activity = 0.2
+rho_var = 0.15
+act_var = 0.15
+damage = 0.2
+
+[criticality.damage_split]
+band = 0.5
+growth = 0.5
+
+[ui]
+fps = 30

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+out/
+*.db
+.venv/
+*.jsonl
