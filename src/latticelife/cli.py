@@ -49,6 +49,9 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--shape", choices=SHAPES, default="square")
     discover.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
 
+    ui = subparsers.add_parser("ui", help="Interactive pygame app.")
+    ui.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+
     return parser
 
 
@@ -142,6 +145,15 @@ def run_discover(args: argparse.Namespace) -> None:
         signal.signal(signal.SIGINT, previous_handler)
 
 
+def run_ui(args: argparse.Namespace) -> None:
+    """Launches the interactive pygame app. Imported lazily so `autorun`/`discover` never pull
+    in pygame on their path (§6.13's headless commands must never import pygame)."""
+    from latticelife.ui.app import App
+
+    config = load_config(args.config)
+    App(config).run()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -151,6 +163,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(run_autorun(args)))
         elif args.command == "discover":
             run_discover(args)
+        elif args.command == "ui":
+            run_ui(args)
         return 0
     except Exception as exc:
         log_event("app", level="error", event="unhandled_exception", error=str(exc))
