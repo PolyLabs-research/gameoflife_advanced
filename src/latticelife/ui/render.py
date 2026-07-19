@@ -48,6 +48,24 @@ STATIC_COLORS = [
 ]
 
 
+def fit_cell_size(shape: str, width: int, height: int, available_width: int, available_height: int) -> int:
+    """Largest integer cell size that fits a `width` x `height` grid of `shape` cells within
+    `available_width` x `available_height` pixels. Square cells tile edge-to-edge (1 unit of
+    size per column/row), but hex/triangle cells overlap the way `hexagon_corners`/
+    `triangle_corners` place them, so their pixel footprint per column/row is a different
+    ratio — using the square ratio for them undersizes or oversizes the whole grid by a
+    constant factor no choice of width/height can compensate for."""
+    if shape == "square":
+        factor_w, factor_h = float(width), float(height)
+    elif shape == "hexagon":
+        factor_w, factor_h = 1.5 * width + 0.5, math.sqrt(3) * (height + 0.5)
+    elif shape == "triangle":
+        factor_w, factor_h = (width + 1) / 2, math.sqrt(3) / 2 * height
+    else:
+        raise ValueError(f"Unsupported grid shape: {shape}")
+    return max(1, int(min(available_width / factor_w, available_height / factor_h)))
+
+
 def build_palette(lifeforms: list[Lifeform]) -> np.ndarray:
     """(2L+1, 3) uint8 palette: index 0 is dead, 1..L are alive shades per species id, and
     L+1..2L are static shades per species id (offset by L). L = max lifeform id, or 0 if there

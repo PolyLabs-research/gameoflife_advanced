@@ -282,6 +282,9 @@ class Dropdown:
         return False
 
     def draw(self, surface: pygame.Surface, rect: pygame.Rect) -> None:
+        """Draws only the closed box. Callers must also call `draw_options` — after
+        everything else in the panel — so an open list paints on top instead of being
+        overdrawn by whatever rows come after this one in layout order."""
         self.rect = rect
         pygame.draw.rect(surface, BUTTON_COLOR, rect, border_radius=4)
         border = TEXT_COLOR if self.active else BUTTON_HOVER_COLOR
@@ -290,9 +293,11 @@ class Dropdown:
         label = self.font.render(label_text, True, TEXT_COLOR)
         surface.blit(label, label.get_rect(midleft=(rect.x + 8, rect.centery)))
 
+    def draw_options(self, surface: pygame.Surface) -> None:
         self._option_rects = []
-        if not self.active:
+        if not self.active or self.rect is None:
             return
+        rect = self.rect
 
         list_height = min(self.MAX_HEIGHT, len(self.options) * self.ITEM_HEIGHT)
         list_rect = pygame.Rect(rect.x, rect.bottom, rect.width, list_height)

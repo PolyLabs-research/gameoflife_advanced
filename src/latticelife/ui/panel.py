@@ -10,9 +10,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
+import numpy as np
 import pygame
 
 from latticelife.config import Config
+from latticelife.core.geometries import max_degree
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
 from latticelife.ui.widgets import (
@@ -57,6 +59,7 @@ class SettingsPanel:
     fps_slider: Slider = field(init=False)
     species_count_input: NumericInput = field(init=False)
     rule_inputs: list[tuple[TextInput, TextInput]] = field(init=False)
+    randomize_buttons: list[Button] = field(init=False)
     apply_button: Button = field(init=False)
 
     def __post_init__(self) -> None:
@@ -83,6 +86,10 @@ class SettingsPanel:
             )
             for lf in self.lifeforms
         ]
+        self.randomize_buttons = [
+            Button(pygame.Rect(0, 0, 0, 0), "R", self.font, on_click=self._make_randomizer(i))
+            for i in range(len(self.lifeforms))
+        ]
         self.apply_button = Button(
             pygame.Rect(0, 0, 0, 0), "Apply", self.font, primary=True, on_click=self._apply
         )
@@ -95,13 +102,37 @@ class SettingsPanel:
         self.config = replace(self.config, grid=new_grid)
         self.wrap_button.text = self._wrap_label()
 
+    def _make_randomizer(self, index: int) -> Callable[[], None]:
+        return lambda: self._randomize_rule(index)
+
+    def _randomize_rule(self, index: int) -> None:
+        """Populates B/S with a random rule sized to the selected shape's neighbor count,
+        reusing the same `Rule.random` the ES discovery process samples candidates from."""
+        shape = self.shape_dropdown.selected or self.config.grid.shape
+        n = max_degree(shape, self.config.grid.triangle_mode)
+        rule = Rule.random(
+            n, self.config.discovery.p_birth, self.config.discovery.p_survive, np.random.default_rng()
+        )
+        birth_input, survive_input = self.rule_inputs[index]
+        birth_input.text = _rule_string(rule.birth)
+        survive_input.text = _rule_string(rule.survive)
+
     def _resize_species(self, count: int) -> None:
         current = len(self.rule_inputs)
         if count > current:
             for _ in range(count - current):
                 self.rule_inputs.append((TextInput("3", self.font), TextInput("23", self.font)))
+                self.randomize_buttons.append(
+                    Button(
+                        pygame.Rect(0, 0, 0, 0),
+                        "R",
+                        self.font,
+                        on_click=self._make_randomizer(len(self.rule_inputs) - 1),
+                    )
+                )
         elif count < current:
             del self.rule_inputs[count:]
+            del self.randomize_buttons[count:]
 
     def _apply(self) -> None:
         self.width_input.commit()
@@ -140,7 +171,12 @@ class SettingsPanel:
         for birth_input, survive_input in self.rule_inputs:
             widgets.append(birth_input)
             widgets.append(survive_input)
-        return any(widget.handle_event(event) for widget in widgets)
+        widgets.extend(self.randomize_buttons)
+        # Not a generator: a blurring TextInput/NumericInput reports "handled" for the same
+        # click that lands on another widget (e.g. Apply), and `any` must not short-circuit
+        # before that other widget also sees the event.
+        handled = [widget.handle_event(event) for widget in widgets]
+        return any(handled)
 
     def draw(self, surface: pygame.Surface, x: int, y: int, width: int) -> int:
         cursor = y
@@ -166,7 +202,8 @@ class SettingsPanel:
         cursor += self.species_section.draw_header(surface, x, cursor, width) + CONTROL_GAP
         if self.species_section.expanded:
             cursor = self._draw_row(surface, x, cursor, width, "Count", self.species_count_input)
-            half = (width - LABEL_WIDTH) // 2
+            button_size = ROW_HEIGHT - 4
+            half = (width - LABEL_WIDTH - button_size - CONTROL_GAP) // 2
             for i, (birth_input, survive_input) in enumerate(self.rule_inputs):
                 label = self.font.render(f"B{i + 1}", True, LABEL_COLOR)
                 surface.blit(label, (x, cursor + 6))
@@ -175,12 +212,21 @@ class SettingsPanel:
                 survive_input.draw(
                     surface, pygame.Rect(x + LABEL_WIDTH + half, cursor, half - 4, ROW_HEIGHT - 4)
                 )
+                randomize_button = self.randomize_buttons[i]
+                randomize_button.rect = pygame.Rect(
+                    x + width - button_size, cursor, button_size, button_size
+                )
+                randomize_button.draw(surface)
                 cursor += ROW_HEIGHT
         cursor += SECTION_GAP
 
         self.apply_button.rect = pygame.Rect(x, cursor, width, ROW_HEIGHT)
         self.apply_button.draw(surface)
         cursor += ROW_HEIGHT
+
+        # Drawn last so an open option list paints on top of the rows below it instead of
+        # being immediately overdrawn by them.
+        self.shape_dropdown.draw_options(surface)
 
         return cursor - y
 

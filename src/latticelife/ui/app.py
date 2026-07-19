@@ -134,19 +134,29 @@ def _draw_stat_cards(
     return rows * (card_height + 8)
 
 
-def _draw_population_chart(surface: pygame.Surface, rect: pygame.Rect, history) -> None:
+def _draw_population_chart(
+    surface: pygame.Surface, rect: pygame.Rect, session: SimulationSession, palette
+) -> None:
+    """One line per lifeform, colored to match its grid palette entry, sharing a y-axis
+    scaled to total population (every species's count is <= the total at any generation)."""
     pygame.draw.rect(surface, CHART_BACKGROUND, rect, border_radius=6)
     pygame.draw.rect(surface, CHART_GRID_LINES, rect, 1, border_radius=6)
-    if len(history) < 2:
+    records = session.history_records
+    if len(records) < 2:
         return
-    values = list(history)
-    max_v = max(values) or 1
-    n = len(values)
-    points = [
-        (rect.x + i / (n - 1) * rect.width, rect.bottom - (v / max_v) * (rect.height - 8) - 4)
-        for i, v in enumerate(values)
-    ]
-    pygame.draw.lines(surface, ACCENT_PRIMARY, False, points, 2)
+    n = len(records)
+    max_v = max(session.history_alive) or 1
+
+    def to_points(values: list[int]) -> list[tuple[float, float]]:
+        return [
+            (rect.x + i / (n - 1) * rect.width, rect.bottom - (v / max_v) * (rect.height - 8) - 4)
+            for i, v in enumerate(values)
+        ]
+
+    for lf in session.lifeforms:
+        per_species = [record.lifeform_metrics[lf.id].alive for record in records]
+        color = tuple(int(c) for c in palette[lf.id])
+        pygame.draw.lines(surface, color, False, to_points(per_species), 2)
 
 
 def _draw_keyboard_hints(
@@ -281,10 +291,13 @@ class App:
                     self.geometric_renderer.reset()
                 continue
 
-            if self.settings_panel.handle_event(event):
-                continue
+            # Both handlers must run regardless of what the other returns: a TextInput/
+            # NumericInput in the settings panel reports "handled" when it blurs, even if
+            # the same click actually lands on one of the action buttons below.
+            panel_handled = self.settings_panel.handle_event(event)
             buttons = (self.play_button, self.reset_button, self.step_button, self.new_button)
-            if any(b.handle_event(event) for b in buttons):
+            buttons_handled = any([b.handle_event(event) for b in buttons])
+            if panel_handled or buttons_handled:
                 continue
 
             if event.type == pygame.KEYDOWN:
@@ -323,7 +336,9 @@ class App:
 
     def _toggle_cell(self, pos: tuple[int, int], grid_rect: pygame.Rect) -> None:
         grid = self.session.grid
-        cell_size = max(1, min(grid_rect.width // grid.width, grid_rect.height // grid.height))
+        cell_size = render.fit_cell_size(
+            grid.shape, grid.width, grid.height, grid_rect.width, grid_rect.height
+        )
         col = (pos[0] - grid_rect.x) // cell_size
         row = (pos[1] - grid_rect.y) // cell_size
         if 0 <= row < grid.height and 0 <= col < grid.width:
@@ -356,7 +371,7 @@ class App:
         cursor_y += 16
         self.settings_panel.draw(self.screen, 16, cursor_y, panel_rect.width - 32)
 
-        _draw_population_chart(self.screen, self.layout.chart_rect(), self.session.history_alive)
+        _draw_population_chart(self.screen, self.layout.chart_rect(), self.session, self.palette)
 
         if self.view_mode == "3D" and self.torus_renderer is not None:
             grid = self.session.grid
@@ -380,7 +395,9 @@ class App:
     def _draw_grid(self) -> None:
         grid_rect = self.layout.grid_rect()
         grid = self.session.grid
-        cell_size = max(1, min(grid_rect.width // grid.width, grid_rect.height // grid.height))
+        cell_size = render.fit_cell_size(
+            grid.shape, grid.width, grid.height, grid_rect.width, grid_rect.height
+        )
 
         if grid.shape == "square":
             render.render_square(
