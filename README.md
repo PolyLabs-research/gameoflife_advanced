@@ -29,6 +29,10 @@ Relative output paths in a config (`recording.db_path`, `discovery.checkpoint_pa
 above the config file that holds `pyproject.toml`), not the directory you run from. Set
 `LATTICELIFE_LOG_DIR` to send the JSONL logs somewhere else.
 
+Rules are written `B3/S23`. Once a neighbour count reaches 10 (12-neighbour triangles), counts
+are comma-separated: `B2,5,8,10/S0,8,12`. A single count of 10 or more keeps a trailing comma
+(`B12,/S2,3`) so it cannot be read as two digits.
+
 ## Development
 
 ```bash

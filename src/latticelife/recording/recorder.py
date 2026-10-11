@@ -3,6 +3,10 @@ touches this DB — it writes its own JSONL/checkpoints (§6.11). No `check_same
 lock. Fixed DDL, no runtime ALTER-TABLE migration code: recording starts fresh on schema v2, the
 legacy DB's lifespan-derived columns (D-1) and zero-filled metric columns (D-2) are not migrated
 (see the salvage manifest).
+
+`lifeform_meta.birth`/`survive` hold `core.rules.format_counts` text: the spec's compact digits
+(`'3'`, `'23'`) while every count is <= 9, comma-separated once one reaches 10 (`'2,10,12'`,
+`'12,'`), which `core.rules.parse_counts` reads back unambiguously (12-neighbour triangles).
 """
 
 from __future__ import annotations
@@ -10,6 +14,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from latticelife.core.rules import format_counts
 
 if TYPE_CHECKING:
     from latticelife.config import Config
@@ -45,10 +51,6 @@ CREATE TABLE IF NOT EXISTS life_records (
   PRIMARY KEY (session_id, generation, lifeform)
 );
 """
-
-
-def _rule_string(counts: set[int]) -> str:
-    return "".join(str(v) for v in sorted(counts))
 
 
 class Recorder:
@@ -114,7 +116,7 @@ class Recorder:
         conn.executemany(
             "INSERT INTO lifeform_meta (session_id, lifeform, birth, survive) VALUES (?, ?, ?, ?)",
             [
-                (session_id, lf.id, _rule_string(lf.rule.birth), _rule_string(lf.rule.survive))
+                (session_id, lf.id, format_counts(lf.rule.birth), format_counts(lf.rule.survive))
                 for lf in lifeforms
             ],
         )

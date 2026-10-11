@@ -3,6 +3,12 @@ against `Config`/`Lifeform` rather than the legacy Game/grid objects. Widget wir
 widgets themselves live in `ui/widgets.py`. Changes are staged in the panel's own widget state
 and only take effect when "Apply" is clicked, via the `on_apply` callback the caller supplies
 (the app owns rebuilding the SimulationSession from a new Config).
+
+Apply validates before it calls back: grid sizes that `core.geometries.validate_dimensions`
+rejects (e.g. an odd width for a wrapped hexagon grid) and rule fields that do not parse, or name
+a count above the selected shape's neighbour count, set `error` — drawn in red above the Apply
+button — and nothing is applied. Rule fields use the comma-separated display form of
+`core.rules` (`'2,3'`), so the 10-12 neighbour counts of edge+vertex triangles round-trip.
 """
 
 from __future__ import annotations
@@ -13,10 +19,10 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 import pygame
 
-from latticelife.config import Config
-from latticelife.core.geometries import max_degree
+from latticelife.config import MAX_FPS, MAX_LIFEFORMS, MIN_FPS, Config
+from latticelife.core.geometries import max_degree, validate_dimensions
 from latticelife.core.lifeform import Lifeform
-from latticelife.core.rules import Rule
+from latticelife.core.rules import Rule, format_count_list, parse_count_list
 from latticelife.ui.widgets import (
     Button,
     CollapsibleSection,
@@ -32,14 +38,24 @@ CONTROL_GAP = 8
 ROW_HEIGHT = 32
 LABEL_WIDTH = 90
 LABEL_COLOR = (235, 235, 245)
+ERROR_COLOR = (248, 113, 113)
 
 
-def _rule_string(counts: set[int]) -> str:
-    return "".join(str(v) for v in sorted(counts))
-
-
-def _parse_rule(text: str) -> set[int]:
-    return {int(ch) for ch in text if ch.isdigit()}
+def _wrap_text(text: str, font: pygame.font.Font, width: int) -> list[str]:
+    """Greedy word wrap of `text` to lines no wider than `width` pixels (a single word wider
+    than that gets a line of its own)."""
+    lines: list[str] = []
+    line = ""
+    for word in text.split():
+        candidate = f"{line} {word}" if line else word
+        if line and font.size(candidate)[0] > width:
+            lines.append(line)
+            line = word
+        else:
+            line = candidate
+    if line:
+        lines.append(line)
+    return lines
 
 
 @dataclass
@@ -61,6 +77,7 @@ class SettingsPanel:
     rule_inputs: list[tuple[TextInput, TextInput]] = field(init=False)
     randomize_buttons: list[Button] = field(init=False)
     apply_button: Button = field(init=False)
+    error: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.grid_section = CollapsibleSection("Grid", self.font)
@@ -74,15 +91,20 @@ class SettingsPanel:
             pygame.Rect(0, 0, 0, 0), self._wrap_label(), self.font, on_click=self._toggle_wrap
         )
         self.fps_slider = Slider(
-            "FPS", 1, 60, self.config.ui.fps, self.font, format_fn=lambda v: f"{int(v)} fps"
+            "FPS",
+            MIN_FPS,
+            MAX_FPS,
+            self.config.ui.fps,
+            self.font,
+            format_fn=lambda v: f"{int(v)} fps",
         )
         self.species_count_input = NumericInput(
-            len(self.lifeforms), 1, 10, self.font, on_commit=self._resize_species
+            len(self.lifeforms), 1, MAX_LIFEFORMS, self.font, on_commit=self._resize_species
         )
         self.rule_inputs = [
             (
-                TextInput(_rule_string(lf.rule.birth), self.font, placeholder="birth"),
-                TextInput(_rule_string(lf.rule.survive), self.font, placeholder="survive"),
+                TextInput(format_count_list(lf.rule.birth), self.font, placeholder="birth"),
+                TextInput(format_count_list(lf.rule.survive), self.font, placeholder="survive"),
             )
             for lf in self.lifeforms
         ]
@@ -113,14 +135,14 @@ class SettingsPanel:
         discovery = self.config.discovery
         rule = Rule.random(n, discovery.p_birth, discovery.p_survive, np.random.default_rng())
         birth_input, survive_input = self.rule_inputs[index]
-        birth_input.text = _rule_string(rule.birth)
-        survive_input.text = _rule_string(rule.survive)
+        birth_input.text = format_count_list(rule.birth)
+        survive_input.text = format_count_list(rule.survive)
 
     def _resize_species(self, count: int) -> None:
         current = len(self.rule_inputs)
         if count > current:
             for _ in range(count - current):
-                self.rule_inputs.append((TextInput("3", self.font), TextInput("23", self.font)))
+                self.rule_inputs.append((TextInput("3", self.font), TextInput("2,3", self.font)))
                 self.randomize_buttons.append(
                     Button(
                         pygame.Rect(0, 0, 0, 0),
@@ -133,7 +155,20 @@ class SettingsPanel:
             del self.rule_inputs[count:]
             del self.randomize_buttons[count:]
 
+    def set_lifeforms(self, lifeforms: list[Lifeform]) -> None:
+        """Show `lifeforms`' rules in the species rows (one row each, adding or removing rows to
+        match) and clear any error — for when the app replaces the species itself, e.g. New."""
+        self.lifeforms = lifeforms
+        self.species_count_input.set_value(len(lifeforms))
+        self._resize_species(len(lifeforms))
+        for (birth_input, survive_input), lf in zip(self.rule_inputs, lifeforms, strict=True):
+            birth_input.text = format_count_list(lf.rule.birth)
+            survive_input.text = format_count_list(lf.rule.survive)
+        self.error = None
+
     def _apply(self) -> None:
+        """Validate the staged settings and hand them to `on_apply`; on any invalid value set
+        `error` instead and apply nothing."""
         self.width_input.commit()
         self.height_input.commit()
         self.species_count_input.commit()
@@ -144,14 +179,31 @@ class SettingsPanel:
             width=self.width_input.value,
             height=self.height_input.value,
         )
+        try:
+            validate_dimensions(grid.shape, grid.width, grid.height, grid.wrap, grid.triangle_mode)
+        except ValueError as exc:
+            self.error = str(exc)
+            return
+
+        n = max_degree(grid.shape, grid.triangle_mode)
+        lifeforms = []
+        for i, (birth_input, survive_input) in enumerate(self.rule_inputs):
+            counts: dict[str, set[int]] = {}
+            for part, text_input in (("birth", birth_input), ("survive", survive_input)):
+                try:
+                    counts[part] = parse_count_list(text_input.text, n)
+                except ValueError as exc:
+                    self.error = f"Species {i + 1} {part}: {exc}."
+                    return
+            lifeforms.append(Lifeform(id=i + 1, rule=Rule(**counts)))
+
+        for (birth_input, survive_input), lf in zip(self.rule_inputs, lifeforms, strict=True):
+            birth_input.text = format_count_list(lf.rule.birth)
+            survive_input.text = format_count_list(lf.rule.survive)
+        self.error = None
+
         ui = replace(self.config.ui, fps=int(self.fps_slider.value))
         new_config = replace(self.config, grid=grid, ui=ui)
-
-        lifeforms = [
-            Lifeform(id=i + 1, rule=Rule(birth=_parse_rule(b.text), survive=_parse_rule(s.text)))
-            for i, (b, s) in enumerate(self.rule_inputs)
-        ]
-
         self.on_apply(new_config, lifeforms)
 
     def handle_event(self, event: pygame.event.Event) -> bool:
@@ -218,6 +270,12 @@ class SettingsPanel:
                 randomize_button.draw(surface)
                 cursor += ROW_HEIGHT
         cursor += SECTION_GAP
+
+        if self.error:
+            for line in _wrap_text(self.error, self.font, width):
+                surface.blit(self.font.render(line, True, ERROR_COLOR), (x, cursor))
+                cursor += self.font.get_linesize()
+            cursor += CONTROL_GAP
 
         self.apply_button.rect = pygame.Rect(x, cursor, width, ROW_HEIGHT)
         self.apply_button.draw(surface)

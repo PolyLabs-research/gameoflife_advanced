@@ -5,7 +5,7 @@ import pytest
 
 from latticelife.config import load_config
 from latticelife.core.lifeform import Lifeform
-from latticelife.core.rules import Rule
+from latticelife.core.rules import Rule, parse_counts
 from latticelife.recording.recorder import Recorder
 from latticelife.session.metrics import ClusterMetrics, GridMetrics, LifeformMetrics
 from latticelife.session.session import GenerationRecord
@@ -91,6 +91,30 @@ def test_start_session_writes_metadata_and_lifeform_rules(tmp_path):
     )
     assert rules[1] == "3/23"
     assert rules[2] == "2/45"
+
+
+def test_rules_with_counts_of_ten_or_more_are_stored_unambiguously(tmp_path):
+    """F3: triangle edge+vertex rules {12}/{0,12} and {1,2}/{0,1,2} both used to be stored as
+    '12'/'012'."""
+    db_path = tmp_path / "test.db"
+    lifeforms = [
+        Lifeform(1, Rule(birth={12}, survive={0, 12})),
+        Lifeform(2, Rule(birth={1, 2}, survive={0, 1, 2})),
+        Lifeform(3, Rule(birth={5, 7, 10}, survive={2, 3})),
+    ]
+
+    with Recorder(db_path) as recorder:
+        recorder.start_session("sess-t", _config(), lifeforms, planned_generations=5, seed=1)
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT lifeform, birth, survive FROM lifeform_meta WHERE session_id = ? ORDER BY 1",
+        ("sess-t",),
+    ).fetchall()
+    assert rows == [(1, "12,", "0,12"), (2, "12", "012"), (3, "5,7,10", "23")]
+    for (lifeform_id, birth, survive), lf in zip(rows, lifeforms, strict=True):
+        assert lifeform_id == lf.id
+        assert Rule(parse_counts(birth), parse_counts(survive)) == lf.rule
 
 
 def test_record_generation_writes_rows_with_null_clusters_on_non_stride(tmp_path):
