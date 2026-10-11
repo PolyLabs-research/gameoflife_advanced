@@ -7,9 +7,14 @@ unchanged; band thresholds and weights that used to be hardcoded now come from
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
+
+# Fraction of a run treated as transient: scoring and freeze detection
+# (`experiments.runner.run_timeseries`) only look at steps from int(steps * BURN_IN_FRAC) on.
+BURN_IN_FRAC = 0.4
 
 
 @dataclass(frozen=True)
@@ -49,8 +54,9 @@ class CriticalityConfig:
 
 
 def _band_score(value: float, band: Band) -> float:
-    """Piecewise reward: linear up into the target band, flat in band, linear down."""
-    if value < band.low or value > band.high:
+    """Piecewise reward: linear up into the target band, flat in band, linear down. A NaN is
+    outside every band."""
+    if not band.low <= value <= band.high:
         return 0.0
     if value < band.target_low:
         return (value - band.low) / (band.target_low - band.low)
@@ -74,11 +80,17 @@ def score_timeseries(
     - Activity-band: prefer moderate activity (not zero, not maximal).
     - Variance: reward some variance but clamp so pure noise doesn't dominate.
     - Freeze penalty: early freeze is penalized.
+
+    Non-finite input (a NaN or inf in rho, activity or h) scores 0.0: the final clamp would
+    otherwise turn a NaN score into a perfect 1.0.
     """
     if len(rho) == 0 or len(activity) == 0:
         return 0.0
+    inputs = (rho, activity) if h is None else (rho, activity, h)
+    if not all(np.isfinite(values).all() for values in inputs):
+        return 0.0
 
-    burn_in = int(steps * 0.4)
+    burn_in = int(steps * BURN_IN_FRAC)
     rho_post = rho[burn_in:]
     activity_post = activity[burn_in:]
 
@@ -119,4 +131,6 @@ def score_timeseries(
 
     score *= 1.0 - config.freeze_penalty_weight * freeze_penalty
 
+    if not math.isfinite(score):
+        return 0.0
     return max(0.0, min(1.0, score))
