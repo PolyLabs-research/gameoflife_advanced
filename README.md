@@ -36,9 +36,10 @@ An installed (non-editable) `latticelife` command has no checkout: it uses the c
 `$XDG_DATA_HOME/latticelife/out` (default `~/.local/share/latticelife/out`), whichever directory
 it is run from.
 
-Rules are written `B3/S23`. Once a neighbour count reaches 10 (12-neighbour triangles), counts
-are comma-separated: `B2,5,8,10/S0,8,12`. A single count of 10 or more keeps a trailing comma
-(`B12,/S2,3`) so it cannot be read as two digits.
+Rules are written `B3/S23`. Once any neighbour count in a rule reaches 10 (12-neighbour
+triangles), all of its counts are comma-separated: `B2,5,8,10/S0,8,12`, `B1,3,4,5,9/S7,9,12`. A
+single count of 10 or more keeps a trailing comma (`B12,/S2,3`) so it cannot be read as two
+digits.
 
 ## Recording and discovery
 

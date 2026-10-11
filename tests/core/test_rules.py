@@ -89,6 +89,59 @@ def test_to_bs_string_uses_commas_for_edge_vertex_triangle_rules():
     assert rule.to_bs_string(12) == "B2,5,8,10/S0,8,12"
 
 
+@pytest.mark.parametrize(
+    ("birth", "survive", "text"),
+    [
+        ({1, 3, 4, 5, 9}, {7, 9, 12}, "B1,3,4,5,9/S7,9,12"),
+        ({7, 9, 12}, {1, 3, 4, 5, 9}, "B7,9,12/S1,3,4,5,9"),
+        ({12}, {2}, "B12,/S2"),
+        ({2}, {12}, "B2/S12,"),
+        ({2, 3}, {10}, "B2,3/S10,"),
+        ({12}, {2, 3}, "B12,/S2,3"),
+        (set(), {0, 12}, "B/S0,12"),
+        ({3}, {2, 3}, "B3/S23"),
+    ],
+)
+def test_to_bs_string_picks_one_form_for_the_whole_rule(birth, survive, text):
+    """The form was chosen per half, so a 12-neighbour rule could read 'B13459/S7,9,12': compact
+    digits beside commas, and '13459' read by a person as holding 13."""
+    rule = Rule(birth=birth, survive=survive)
+    assert rule.to_bs_string(12) == text
+    assert Rule.from_bs_string(text) == rule
+
+
+def test_to_bs_string_picks_the_form_from_the_counts_it_keeps():
+    assert Rule(birth={3}, survive={2, 3, 10}).to_bs_string(8) == "B3/S23"
+
+
+@given(st.sets(st.integers(0, 12)), st.sets(st.integers(0, 12)))
+def test_bs_string_halves_share_one_form(birth, survive):
+    text = Rule(birth=birth, survive=survive).to_bs_string(12)
+    b_text, s_text = text[1:].split("/S")
+    if all(v <= 9 for v in birth | survive):
+        assert "," not in text
+    else:
+        for half, counts in ((b_text, birth), (s_text, survive)):
+            assert len(counts) < 2 or "," in half, text  # no run of digits holding two counts
+
+
+def test_from_bs_string_still_reads_strings_with_mixed_halves():
+    """Rows written while the form was chosen per half stay loadable."""
+    assert Rule.from_bs_string("B13459/S7,9,12") == Rule({1, 3, 4, 5, 9}, {7, 9, 12})
+
+
+def test_format_counts_comma_form_can_be_forced():
+    assert format_counts({2, 3}, comma_form=True) == "2,3"
+    assert format_counts({2}, comma_form=True) == "2"
+    assert format_counts({12}, comma_form=True) == "12,"
+    assert format_counts(set(), comma_form=True) == ""
+    assert format_counts({2, 3}, comma_form=False) == "23"
+    for counts in ({2, 3}, {2}, {12}, set()):
+        assert parse_counts(format_counts(counts, comma_form=True)) == counts
+    with pytest.raises(ValueError, match="comma form"):
+        format_counts({2, 12}, comma_form=False)
+
+
 @pytest.mark.parametrize("text", ["B3/S23", "b3/s23", " B3/S23 ", "B3/S2,3", "B3/S2 3"])
 def test_from_bs_string_accepts_both_forms(text):
     assert Rule.from_bs_string(text) == Rule(birth={3}, survive={2, 3})

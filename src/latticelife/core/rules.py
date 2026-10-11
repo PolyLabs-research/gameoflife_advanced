@@ -14,7 +14,10 @@ reads one goes through the helpers here rather than joining digits itself:
   comma-separated as soon as any count is >= 10 (`'2,5,8,10'`). Plain digit concatenation is
   not injective once counts reach 10 — {12} and {1, 2} would both read `'12'` — and triangle
   edge+vertex has 12 neighbours (§6.1). A lone count >= 10 keeps a trailing comma (`'12,'`) so
-  the text still carries the separator that tells the parser it is not two digits.
+  the text still carries the separator that tells the parser it is not two digits. A B/S
+  string picks one form for the whole rule (`B1,3,4,5,9/S7,9,12`, never `B13459/S7,9,12`);
+  the recorder's separate birth and survive columns each pick their own. The parser reads each
+  half on its own, so strings in either style load.
 - **Display form** (`format_count_list` / `parse_count_list`, used by the settings panel's rule
   fields): always comma-separated (`'2,3'`), parsed leniently from whatever separators a person
   types, validated against the shape's maximum degree.
@@ -41,15 +44,25 @@ def _sorted_counts(counts: Iterable[int]) -> list[int]:
     return values
 
 
-def format_counts(counts: Iterable[int]) -> str:
+def format_counts(counts: Iterable[int], *, comma_form: bool | None = None) -> str:
     """Persisted form of a count set: `'23'` while every count is <= 9, else `'2,10,12'`
     (with a trailing comma for a single count >= 10, e.g. `'12,'`). Inverse of
-    `parse_counts`."""
+    `parse_counts`.
+
+    `comma_form=True` writes commas even when every count is <= 9 (`'2,3'`; a single count
+    <= 9 needs no comma, `'2'` reads back the same either way), so the two halves of one rule
+    can share a form (`Rule.to_bs_string`). `None` picks the form from these counts alone.
+    `False` with a count >= 10 raises ValueError: compact digits cannot hold it."""
     values = _sorted_counts(counts)
-    if all(v <= 9 for v in values):
+    needs_commas = any(v > 9 for v in values)
+    if comma_form is None:
+        comma_form = needs_commas
+    elif not comma_form and needs_commas:
+        raise ValueError(f"counts >= 10 need the comma form: {values}")
+    if not comma_form:
         return "".join(str(v) for v in values)
     text = ",".join(str(v) for v in values)
-    return text if len(values) > 1 else f"{text},"
+    return f"{text}," if len(values) == 1 and values[0] > 9 else text
 
 
 def parse_counts(text: str) -> set[int]:
@@ -117,15 +130,22 @@ class Rule:
 
     def to_bs_string(self, n: int) -> str:
         """Format the rule as B*/S* in the persisted notation (`format_counts`), only including
-        counts up to n: `B3/S23`, or `B2,5,8,10/S0,8,12` once a count reaches 10."""
-        b = format_counts(x for x in self.birth if x <= n)
-        s = format_counts(x for x in self.survive if x <= n)
+        counts up to n: `B3/S23`, or `B2,5,8,10/S0,8,12` once any count of the rule reaches 10.
+        The form is chosen for the whole rule, not per half, so a 12-neighbour rule never reads
+        `B13459/S7,9,12` (is that 13 or 1 and 3?) but `B1,3,4,5,9/S7,9,12`."""
+        birth = [x for x in self.birth if x <= n]
+        survive = [x for x in self.survive if x <= n]
+        comma_form = any(x > 9 for x in birth + survive)
+        b = format_counts(birth, comma_form=comma_form)
+        s = format_counts(survive, comma_form=comma_form)
         return f"B{b}/S{s}"
 
     @staticmethod
     def from_bs_string(text: str) -> Rule:
-        """Inverse of `to_bs_string`: accepts `B3/S23`, `B2,10/S0,12,` and the empty `B/S`
-        (case-insensitive). Raises ValueError for anything else."""
+        """Inverse of `to_bs_string`: accepts `B3/S23`, `B2,10/S0,12`, `B12,/S2` and the empty
+        `B/S` (case-insensitive). Each half is parsed on its own (`parse_counts`), so a string
+        whose halves use different forms (`B13459/S7,9,12`) also loads. Raises ValueError for
+        anything else."""
         match = _BS_STRING.match(text)
         if match is None:
             raise ValueError(f"not a B/S rule string: {text!r}")
