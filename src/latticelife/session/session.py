@@ -22,7 +22,9 @@ each species against its count on the grid just before the step, so generation 1
 against the seeded grid and any edit made between steps is never counted as growth.
 
 Manual cell edits go through `set_cell()`, never straight into the grid arrays, so the
-sudden-death window describes the edited grid rather than the pre-edit one.
+sudden-death window describes the edited grid rather than the pre-edit one: it restarts with the
+edited grid as its generation 0, so an extinction in the first generation after an edit is
+reported too.
 """
 
 from __future__ import annotations
@@ -100,9 +102,12 @@ class SimulationSession:
         self.history_alive: deque[int] = deque(maxlen=history_limit)
         self.history_volatility: deque[float] = deque(maxlen=history_limit)
         self.history_records: deque[GenerationRecord] = deque(maxlen=history_limit)
-        # How many trailing history_alive entries the sudden-death check may use, or None for
-        # all of them. A manual edit sets it to 0 (see `restart_alert_window`).
+        # The sudden-death window after a manual edit (see `restart_alert_window`):
+        # `_alert_horizon` counts the generations stepped since the edit, whose history_alive
+        # entries the check may use, or is None when the whole history is usable again;
+        # `_alert_baseline` is the edited grid's total, the restarted window's generation 0.
         self._alert_horizon: int | None = None
+        self._alert_baseline = 0
 
         self.randomise_lifeforms()
         self._start_history()
@@ -205,16 +210,19 @@ class SimulationSession:
     def restart_alert_window(self) -> None:
         """Start the sudden-death window afresh from the current generation: alive counts
         recorded before now are kept in `history_alive` (the chart reads them) but no longer
-        compared against, so no sudden-death alert fires until a full window of new
-        generations exists."""
+        compared against. The edited grid becomes the window's generation 0, as the seeded grid
+        is for a new session: its total is taken when the next step starts, after every edit
+        made in between, so a population edited down to cells that die in that step is reported
+        a full window later, and nothing earlier fires."""
         self._alert_horizon = 0
 
     def _alert_history(self) -> Sequence[int]:
-        if self._alert_horizon is None:
+        """The alive counts sudden death may compare against, oldest first."""
+        horizon = self._alert_horizon
+        if horizon is None:
             return self.history_alive
-        if self._alert_horizon == 0:
-            return ()
-        return list(self.history_alive)[-self._alert_horizon :]
+        # At most a window's worth of entries, read from the deque's end.
+        return [self._alert_baseline, *(self.history_alive[i] for i in range(-horizon, 0))]
 
     def step(self, force_clusters: bool = False) -> UpdateResult:
         # Growth baselines (§6.6 alive_i(t-1)) are read off the grid the step starts from, so
@@ -222,6 +230,9 @@ class SimulationSession:
         previous_alive = {
             lf.id: int(np.count_nonzero(self.grid.occupancy == lf.id)) for lf in self.lifeforms
         }
+        if self._alert_horizon == 0:
+            # The first step since an edit: the grid it finds opens the restarted window.
+            self._alert_baseline = int(np.count_nonzero(self.grid.occupancy))
         result = self.grid.step(self.rng)
         self.generation += 1
 
@@ -268,7 +279,9 @@ class SimulationSession:
         self.history_alive.append(total_alive)
         if self._alert_horizon is not None:
             self._alert_horizon += 1
-            if self._alert_horizon >= len(self.history_alive):
+            if self._alert_horizon >= self.config.alerts.sudden_death_window:
+                # The entry a window back now lies after the edit, so the whole history gives
+                # the same comparison (config keeps history_limit >= sudden_death_window).
                 self._alert_horizon = None
         self.history_volatility.append(grid_metrics.volatility)
         self.history_records.append(

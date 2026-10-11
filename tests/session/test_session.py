@@ -268,6 +268,56 @@ def test_sudden_death_detection_resumes_once_a_full_window_follows_an_edit():
     assert session.paused is True
 
 
+@pytest.mark.parametrize("generations_before_edit", [0, 15])
+def test_extinction_in_the_first_generation_after_an_edit_raises_sudden_death(
+    generations_before_edit,
+):
+    """The edited grid is generation 0 of the restarted window, as the seeded grid is for a new
+    session (F7): the window used to hold only post-edit step totals, so an edited population
+    that died in its first step left every baseline at 0 and the alert never fired."""
+    config = _config(width=10, height=10, wrap=True, initial_alive_percentage=0.0, n_lifeforms=1)
+    session = SimulationSession(config, [Lifeform(1, CONWAY)])
+    block = [4 * 10 + 4, 4 * 10 + 5, 5 * 10 + 4, 5 * 10 + 5]  # still life: 4 alive
+    for index in block:
+        session.set_cell(index, 1)
+    session.run(generations_before_edit)
+    assert session.alert is None
+
+    for index in block:
+        session.set_cell(index, 0)
+    for index in (1 * 10 + 1, 5 * 10 + 7, 8 * 10 + 2):  # three isolated cells: dead in one step
+        session.set_cell(index, 1)
+    window = config.alerts.sudden_death_window
+
+    session.run(window + 5)
+
+    alert_generation = generations_before_edit + window  # a full window after the edit
+    assert session.paused is True
+    assert session.generation == alert_generation
+    assert session.alert.kind is AlertKind.SUDDEN_DEATH
+    assert session.alert.message == f"Sudden death: gen {alert_generation} drop 3->0"
+
+
+def test_each_edit_restarts_the_window_from_the_grid_the_next_step_finds():
+    """An edit part-way through a restarted window starts it again, with a new generation 0."""
+    config = _config(width=10, height=10, wrap=True, initial_alive_percentage=0.0, n_lifeforms=1)
+    session = SimulationSession(config, [Lifeform(1, CONWAY)])
+    window = config.alerts.sudden_death_window
+    for index in (1 * 10 + 1, 5 * 10 + 7, 8 * 10 + 2, 2 * 10 + 6):  # four isolated cells
+        session.set_cell(index, 1)
+    session.run(window - 2)  # extinct since generation 1, but no full window yet
+    assert session.alert is None
+
+    for index in (1 * 10 + 1, 5 * 10 + 7):  # a second edit restarts the window
+        session.set_cell(index, 1)
+    session.run(window - 1)
+    assert session.alert is None  # the first edit's 4->0 is no longer in the window
+
+    session.step()
+    assert session.alert.message == f"Sudden death: gen {2 * window - 2} drop 2->0"
+    assert session.paused is True
+
+
 # --- growth baselines (F6) ---------------------------------------------------------------------
 
 
