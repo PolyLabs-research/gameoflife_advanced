@@ -4,12 +4,15 @@ from pathlib import Path
 
 import pytest
 
+import latticelife
 from latticelife.config import (
     DEFAULT_CONFIG_PATH,
+    PACKAGED_CONFIG_PATH,
     PROJECT_ROOT,
     ConfigError,
     load_config,
     project_root_for,
+    user_data_dir,
 )
 
 REPO_DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config" / "default.toml"
@@ -215,6 +218,25 @@ def test_relative_output_paths_resolve_against_the_config_project_root(tmp_path,
     assert config.recording.db_path == str(project.resolve() / "out" / "latticelife.db")
     assert config.discovery.checkpoint_path == str(project.resolve() / "out" / "discovery")
     assert config.logging.dir == str(project.resolve() / "out" / "logs")
+
+
+def test_a_config_inside_the_package_resolves_against_the_project_root(tmp_path, monkeypatch):
+    """The default config an installed wheel ships inside the package (see test_packaging):
+    its outputs go under PROJECT_ROOT, never into the package directory or the cwd."""
+    monkeypatch.chdir(tmp_path)
+    assert PACKAGED_CONFIG_PATH.parent == Path(latticelife.__file__).resolve().parent
+    assert project_root_for(PACKAGED_CONFIG_PATH) == PROJECT_ROOT
+
+
+def test_user_data_dir_follows_xdg_data_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert user_data_dir() == tmp_path / "xdg" / "latticelife"
+    fallback = tmp_path / "home" / ".local" / "share" / "latticelife"
+    monkeypatch.setenv("XDG_DATA_HOME", "relative/data")  # not absolute: ignored, per XDG
+    assert user_data_dir() == fallback
+    monkeypatch.delenv("XDG_DATA_HOME")
+    assert user_data_dir() == fallback
 
 
 def test_without_a_project_paths_resolve_next_to_the_config(tmp_path):

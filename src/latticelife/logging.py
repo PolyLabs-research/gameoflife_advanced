@@ -5,9 +5,10 @@ only other place `src/` writes anything, and it writes structured JSONL.
 The log directory is, in order: `$LATTICELIFE_LOG_DIR` if set (the test suite points it at a
 temporary directory so test runs never touch the real `out/logs`); else the directory passed to
 `configure_logging()`, which commands call with the loaded config's `logging.dir`; else `out/logs`
-under the project root — never the current directory, so a command started elsewhere still logs
-next to its outputs. A log write that fails (unwritable directory, full disk) drops that event
-rather than raising, so logging an error can never replace the error being logged.
+under `config.PROJECT_ROOT` (the checkout, or an installed copy's per-user data directory) —
+never the current directory, so a command started elsewhere still logs next to its outputs. A
+log write that fails (unwritable directory, full disk) drops that event rather than raising, so
+logging an error can never replace the error being logged.
 """
 
 from __future__ import annotations

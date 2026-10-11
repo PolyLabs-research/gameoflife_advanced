@@ -1,6 +1,8 @@
 # Every key is validated on load (latticelife.config.validate_config). Relative output paths
 # (recording.db_path, discovery.checkpoint_path, discovery.discovered_path, logging.dir) resolve
-# against the project root: the nearest folder at or above this file holding pyproject.toml.
+# against the project root: the nearest folder at or above this file holding pyproject.toml. The
+# copy shipped inside an installed package resolves them against the per-user data directory,
+# $XDG_DATA_HOME/latticelife (default ~/.local/share/latticelife).
 
 [grid]
 shape = "square"            # square | hexagon | triangle

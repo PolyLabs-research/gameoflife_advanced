@@ -6,16 +6,23 @@ its known keys, each value the right type and range, and the grid (plus discover
 `ConfigError` naming the `section.key` — a bad value fails at load time, before a session, a
 recording or a discovery run has started on it.
 
-Paths. `DEFAULT_CONFIG_PATH` is the checkout's `config/default.toml`, found from this file's
-location rather than the current directory. Relative output paths in a config (`recording.db_path`,
-`discovery.checkpoint_path`, `discovery.discovered_path`, `logging.dir`) are resolved against the
-config file's project root — the nearest directory at or above the file that holds a
-`pyproject.toml`, else the file's own directory — and stored as absolute paths, so the same config
-writes to the same `out/` whichever directory a command is started from.
+Paths. Nothing here depends on the current directory. Run from a checkout (including an editable
+install), `DEFAULT_CONFIG_PATH` is the checkout's `config/default.toml` and `PROJECT_ROOT` is the
+checkout. An installed (non-editable) copy has no checkout: its wheel ships the same file inside
+the package (`latticelife/default.toml`, see pyproject.toml), and `PROJECT_ROOT` is the per-user
+data directory `$XDG_DATA_HOME/latticelife` (default `~/.local/share/latticelife`).
+
+Relative output paths in a config (`recording.db_path`, `discovery.checkpoint_path`,
+`discovery.discovered_path`, `logging.dir`) are resolved against the config file's project root —
+`PROJECT_ROOT` for the default config shipped inside the package, otherwise the nearest directory
+at or above the file that holds a `pyproject.toml`, else the file's own directory — and stored as
+absolute paths, so the same config writes to the same `out/` whichever directory a command is
+started from.
 """
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
@@ -30,17 +37,37 @@ from latticelife.experiments.criticality import (
     DamageSplit,
 )
 
-
-def _source_project_root() -> Path:
-    """The checkout this package runs from (src layout: `<root>/src/latticelife/config.py`).
-    Falls back to the current directory for an installed, non-editable copy, which has no
-    project directory of its own."""
-    candidate = Path(__file__).resolve().parents[2]
-    return candidate if (candidate / "pyproject.toml").is_file() else Path.cwd()
+_PACKAGE_DIR = Path(__file__).resolve().parent
 
 
-PROJECT_ROOT = _source_project_root()
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "default.toml"
+def _checkout_root() -> Path | None:
+    """The checkout this package runs from (src layout: `<root>/src/latticelife/config.py`, with
+    `<root>/pyproject.toml` and `<root>/config/default.toml`), or None for an installed copy."""
+    root = _PACKAGE_DIR.parents[1]
+    is_checkout = (
+        _PACKAGE_DIR.parent.name == "src"
+        and (root / "pyproject.toml").is_file()
+        and (root / "config" / "default.toml").is_file()
+    )
+    return root if is_checkout else None
+
+
+def user_data_dir() -> Path:
+    """Where an installed copy keeps its outputs: `$XDG_DATA_HOME/latticelife`, or
+    `~/.local/share/latticelife` when that is unset (or, per the XDG spec, not absolute)."""
+    xdg = os.environ.get("XDG_DATA_HOME", "")
+    base = Path(xdg) if os.path.isabs(xdg) else Path.home() / ".local" / "share"
+    return base / "latticelife"
+
+
+CHECKOUT_ROOT = _checkout_root()
+# The root that default output paths hang off: the checkout, else the per-user data directory.
+PROJECT_ROOT = CHECKOUT_ROOT if CHECKOUT_ROOT is not None else user_data_dir()
+# The wheel ships config/default.toml as this file (pyproject.toml, [tool.hatch...wheel]).
+PACKAGED_CONFIG_PATH = _PACKAGE_DIR / "default.toml"
+DEFAULT_CONFIG_PATH = (
+    CHECKOUT_ROOT / "config" / "default.toml" if CHECKOUT_ROOT is not None else PACKAGED_CONFIG_PATH
+)
 
 # Bounds that are not tunables: the int8 occupancy array and the panel's species and FPS
 # controls are built around these.
@@ -169,6 +196,10 @@ _CRITICALITY_TABLES: dict[str, type] = {
 def project_root_for(config_path: str | Path) -> Path:
     """The directory a config's relative output paths resolve against (see module docstring)."""
     config_dir = Path(config_path).resolve().parent
+    if config_dir == _PACKAGE_DIR:
+        # The default config inside an installed package: its outputs must not land in
+        # site-packages (or in whatever project the environment happens to sit in).
+        return PROJECT_ROOT
     for candidate in (config_dir, *config_dir.parents):
         if (candidate / "pyproject.toml").is_file():
             return candidate

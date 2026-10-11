@@ -33,21 +33,37 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# The package, plus config/default.toml shipped inside it as latticelife/default.toml: an
+# installed (non-editable) copy has no checkout to find the default config in. A `sources`
+# rewrite rather than `force-include`, which would also drop a stray latticelife/default.toml
+# into site-packages on an editable install.
 [tool.hatch.build.targets.wheel]
-packages = ["src/latticelife"]
+only-include = ["src/latticelife", "config/default.toml"]
+sources = { "src" = "", "config" = "latticelife" }
 
-# The sdist otherwise takes every file the project .gitignore does not exclude, which picked up
-# local-only files ignored elsewhere (global git excludes, nested .gitignore files).
+# An allowlist: by default the sdist takes every file the project .gitignore does not exclude,
+# which picked up local-only files ignored elsewhere (global git excludes, nested .gitignore
+# files) and anything else lying in the working tree. Docs, scripts and config are limited to
+# the file types they hold, and the excludes drop local files that can sit inside the allowed
+# directories too.
 [tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/config/*.toml",
+    "/docs/**/*.md",
+    "/scripts/**/*.py",
+    "/README.md",
+    "/pyproject.toml",
+    "/uv.lock",
+]
 exclude = [
-    "/.claude",
-    "/.hypothesis",
-    "/.pytest_cache",
-    "/.ruff_cache",
-    "/.venv",
-    "/out",
-    "/dist",
-    "/*.png",
+    "**/.claude",
+    "**/.hypothesis",
+    "**/.pytest_cache",
+    "**/.ruff_cache",
+    "**/__pycache__",
+    "**/.env",
 ]
 
 [tool.ruff]
