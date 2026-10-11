@@ -274,6 +274,35 @@ def test_invalid_config_exits_2_with_one_line(tmp_path, log_dir, capsys):
     assert _events(log_dir, "app")[-1]["event"] == "invalid_input"
 
 
+def test_a_discovery_only_rule_does_not_stop_ui_or_autorun(tmp_path, log_dir, capsys, monkeypatch):
+    """discovery.steps = 100 is too short to detect a 100-step freeze, which only discovery
+    scoring cares about; the check refused the config for every command."""
+    config = write_config(tmp_path, discovery__steps=100, discovery__freeze_window=100)
+
+    assert _autorun(config, tmp_path / "run.db", sessions=1, generations=5) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["sessions"] == 1
+
+    from latticelife.ui import app as ui_app
+
+    launched = []
+
+    class FakeApp:
+        def __init__(self, loaded):
+            launched.append(loaded.discovery.steps)
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr(ui_app, "App", FakeApp)
+    assert cli.main(["ui", "--config", str(config)]) == cli.EXIT_OK
+    assert launched == [100]
+
+    assert cli.main(["discover", "--config", str(config)]) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert err.startswith(f"latticelife discover: {config}: discovery.steps (100)")
+    assert "steps >= 166" in err
+
+
 @pytest.fixture
 def checkout_log_dir(tmp_path, monkeypatch):
     """No LATTICELIFE_LOG_DIR, nothing configured yet, and a stand-in for this checkout's

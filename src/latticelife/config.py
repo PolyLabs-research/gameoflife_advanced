@@ -4,7 +4,10 @@
 its known keys, each value the right type and range, and the grid (plus discovery's always-wrapped
 `grid_size`, for every shape) must pass `core.geometries.validate_dimensions`. Any problem raises
 `ConfigError` naming the `section.key` — a bad value fails at load time, before a session, a
-recording or a discovery run has started on it.
+recording or a discovery run has started on it. Cross-field rules that only a discovery run cares
+about (`validate_discovery_config`: `discovery.steps` must leave room to detect a freeze) are
+checked only when the `discover` command loads the config (`load_config(..., for_discovery=True)`),
+so they never stop `ui` or `autorun`.
 
 Paths. Nothing here depends on the current directory. Run from a checkout (including an editable
 install), `DEFAULT_CONFIG_PATH` is the checkout's `config/default.toml` and `PROJECT_ROOT` is the
@@ -411,18 +414,6 @@ def validate_config(config: Config) -> None:
     _check_range(disc.evals_per_candidate, "discovery.evals_per_candidate", 1)
     _check_range(disc.steps, "discovery.steps", 2)
     _check_range(disc.freeze_window, "discovery.freeze_window", 1)
-    # Freeze detection counts quiet steps only after burn-in; if the run ends first, a rule
-    # that freezes at once is never penalised for it.
-    if int(disc.steps * BURN_IN_FRAC) + disc.freeze_window > disc.steps:
-        min_steps = disc.steps
-        while int(min_steps * BURN_IN_FRAC) + disc.freeze_window > min_steps:
-            min_steps += 1
-        raise ConfigError(
-            f"discovery.steps ({disc.steps}) is too short to detect a freeze: it needs "
-            f"burn-in ({BURN_IN_FRAC:g} x steps) + discovery.freeze_window "
-            f"({disc.freeze_window}) <= steps. Use steps >= {min_steps} or a smaller "
-            "freeze_window"
-        )
     _check_range(disc.p_birth, "discovery.p_birth", 0, 1)
     _check_range(disc.p_survive, "discovery.p_survive", 0, 1)
     _check_range(disc.mutation_rate, "discovery.mutation_rate", 0, 1)
@@ -454,9 +445,50 @@ def validate_config(config: Config) -> None:
     _check_path(config.logging.dir, "logging.dir")
 
 
-def load_config(path: str | Path) -> Config:
+def _freeze_detectable(steps: int, freeze_window: int) -> bool:
+    """Whether a discovery run of `steps` can see `freeze_window` quiet steps after burn-in
+    (`experiments.runner.run_timeseries` counts them from int(steps * BURN_IN_FRAC) on)."""
+    return int(steps * BURN_IN_FRAC) + freeze_window <= steps
+
+
+def min_discovery_steps(freeze_window: int) -> int:
+    """The smallest `discovery.steps` in which a freeze of `freeze_window` quiet steps can be
+    detected. Found by bisection — the test only ever turns from failing to passing as steps
+    grows — so even a huge freeze_window costs a few dozen checks, not one per step."""
+    low, high = 1, max(freeze_window, 1)
+    while not _freeze_detectable(high, freeze_window):
+        low, high = high + 1, high * 2
+    while low < high:
+        mid = (low + high) // 2
+        if _freeze_detectable(mid, freeze_window):
+            high = mid
+        else:
+            low = mid + 1
+    return low
+
+
+def validate_discovery_config(config: Config) -> None:
+    """Cross-field checks that only a discovery run needs. `load_config(..., for_discovery=True)`
+    (the `discover` command) runs them after `validate_config`; plain `load_config` does not, so
+    `ui` and `autorun`, which never read these settings, still accept a config that fails them.
+
+    Freeze detection counts quiet steps only after burn-in; if the run ends first, a rule that
+    freezes at once is never penalised for it, so `discovery.steps` must leave room for
+    `discovery.freeze_window` after burn-in."""
+    disc = config.discovery
+    if not _freeze_detectable(disc.steps, disc.freeze_window):
+        raise ConfigError(
+            f"discovery.steps ({disc.steps}) is too short to detect a freeze: it needs "
+            f"burn-in ({BURN_IN_FRAC:g} x steps) + discovery.freeze_window "
+            f"({disc.freeze_window}) <= steps. Use steps >= "
+            f"{min_discovery_steps(disc.freeze_window)} or a smaller freeze_window"
+        )
+
+
+def load_config(path: str | Path, *, for_discovery: bool = False) -> Config:
     """Load, type and validate a TOML config file, e.g. `config/default.toml`. Raises
-    ConfigError (a ValueError) naming the file and the offending key on any problem."""
+    ConfigError (a ValueError) naming the file and the offending key on any problem.
+    `for_discovery=True` also runs `validate_discovery_config`, for the `discover` command."""
     path = Path(path)
     try:
         with path.open("rb") as f:
@@ -473,6 +505,8 @@ def load_config(path: str | Path) -> Config:
     try:
         config = _config_from_data(data, project_root_for(path))
         validate_config(config)
+        if for_discovery:
+            validate_discovery_config(config)
     except ConfigError as exc:
         raise ConfigError(f"{path}: {exc}") from None
     return config

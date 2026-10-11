@@ -1,16 +1,23 @@
 import re
+import signal
 from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from latticelife.config import ConfigError, load_config
+from latticelife.config import (
+    ConfigError,
+    load_config,
+    min_discovery_steps,
+    validate_discovery_config,
+)
 from latticelife.core.geometries import max_degree
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
 from latticelife.discovery import es
 from latticelife.discovery.es import Candidate, ESState
+from latticelife.experiments.criticality import BURN_IN_FRAC
 from latticelife.experiments.runner import run_timeseries
 from latticelife.session.session import SimulationSession
 
@@ -288,14 +295,53 @@ def _write_config(tmp_path, **discovery):
     return path
 
 
-def test_steps_too_short_for_freeze_detection_are_rejected(tmp_path):
+def test_steps_too_short_for_freeze_detection_are_rejected_for_discovery(tmp_path):
+    def load(**discovery):
+        return load_config(_write_config(tmp_path, **discovery), for_discovery=True)
+
     with pytest.raises(ConfigError, match=r"discovery\.steps \(100\).*steps >= 166"):
-        load_config(_write_config(tmp_path, steps=100))
+        load(steps=100)
     with pytest.raises(ConfigError, match="steps >= 166"):
-        load_config(_write_config(tmp_path, steps=165))
-    assert load_config(_write_config(tmp_path, steps=166)).discovery.steps == 166
-    short = load_config(_write_config(tmp_path, steps=100, freeze_window=20))
-    assert short.discovery.freeze_window == 20
+        load(steps=165)
+    assert load(steps=166).discovery.steps == 166
+    assert load(steps=100, freeze_window=20).discovery.freeze_window == 20
+
+
+def test_steps_too_short_for_freeze_detection_still_load_for_other_commands(tmp_path):
+    """The freeze rule only matters to discovery scoring; `ui` and `autorun` (plain
+    `load_config`) never read discovery.steps, so a quick-run steps = 100 must not stop them."""
+    config = load_config(_write_config(tmp_path, steps=100))
+    assert (config.discovery.steps, config.discovery.freeze_window) == (100, 100)
+    with pytest.raises(ConfigError, match=r"discovery\.steps \(100\)"):
+        validate_discovery_config(config)
+
+
+def test_min_discovery_steps_is_the_smallest_steps_that_detects_a_freeze():
+    for freeze_window in range(1, 400):
+        expected = 1
+        while int(expected * BURN_IN_FRAC) + freeze_window > expected:
+            expected += 1
+        assert min_discovery_steps(freeze_window) == expected, freeze_window
+    assert min_discovery_steps(30_000_000) == 49_999_999
+
+
+def _raise_timeout(signum, frame):
+    raise TimeoutError("took too long")
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs POSIX interval timers")
+def test_a_huge_freeze_window_is_rejected_at_once(tmp_path):
+    """The suggested minimum steps was found by counting up one step at a time, so a slip like
+    freeze_window = 30000000 took seconds to report and 10**12 would have taken days."""
+    path = _write_config(tmp_path, freeze_window=10**12)
+    previous = signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, 5)
+    try:
+        with pytest.raises(ConfigError, match=r"steps >= 1666666666666 or"):
+            load_config(path, for_discovery=True)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def test_default_steps_keep_the_legacy_freeze_detection():

@@ -38,8 +38,8 @@ def run_timeseries(
     `session.step()` (session owns the RNG — no seeding here). rho/activity/freeze-detection
     semantics match the legacy `run_timeseries` exactly: quiet steps are counted from
     int(steps * burn_in_frac) on, so a freeze is only detectable when
-    int(steps * burn_in_frac) + freeze_window <= steps (config validation enforces this for
-    discovery)."""
+    int(steps * burn_in_frac) + freeze_window <= steps (`discover` refuses a config that breaks
+    this: `config.validate_discovery_config`)."""
     total_cells = session.grid.n_cells
     rho = np.zeros(steps, dtype=float)
     activity = np.zeros(steps, dtype=float)

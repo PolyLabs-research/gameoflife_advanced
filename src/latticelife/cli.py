@@ -143,13 +143,14 @@ def _randomise_session_params(
     return session_config, lifeforms
 
 
-def _load_config(path: Path) -> Config:
+def _load_config(path: Path, *, for_discovery: bool = False) -> Config:
     """Load the config and send this process's JSONL logs to its `logging.dir` (§6.10). A config
     file that fails to load still logs next to itself (`log_dir_for`), not in this copy's own
     `out/logs`: a bad config from another project must not write into this checkout. Only a
-    path with no file behind it falls back to the default log directory."""
+    path with no file behind it falls back to the default log directory. `for_discovery` adds
+    the discovery-only checks (`config.validate_discovery_config`), for `discover` alone."""
     try:
-        config = load_config(path)
+        config = load_config(path, for_discovery=for_discovery)
     except ConfigError:
         configure_logging(log_dir_for(path))
         raise
@@ -261,7 +262,7 @@ def run_discover(args: argparse.Namespace) -> int:
     shutdown. Returns the exit status: 0 after a clean stop (time up, Ctrl+C, SIGTERM, SIGHUP),
     1 when the worker crashed, was locked out by another run of the same lineage, or had to be
     killed because it did not stop in time, 130 when a second stop signal had it killed."""
-    config = _load_config(args.config)
+    config = _load_config(args.config, for_discovery=True)
     worker = DiscoveryWorker(config, shape=args.shape)
 
     stop_requests: list[int] = []

@@ -51,8 +51,9 @@ status 130. It will not write into a `--db` file that is not a LatticeLife schem
 changing any of them starts a separate lineage instead of resuming another one. A second
 `discover` on a configuration that is already running refuses to start. Each rule is added to
 `discovery.discovered_path` once per lineage, when its running mean first reaches
-`save_threshold`. `discovery.steps` must leave room to detect a freeze:
-`int(0.4 * steps) + freeze_window <= steps`.
+`save_threshold`. `discover` refuses to start unless `discovery.steps` leaves room to detect a
+freeze: `int(0.4 * steps) + freeze_window <= steps`. `ui` and `autorun` do not check this,
+because they never use those settings.
 
 ## Development
 

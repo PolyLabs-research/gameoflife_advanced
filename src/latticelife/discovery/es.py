@@ -221,8 +221,9 @@ def evaluate_candidate(rule: Rule, shape: str, config: Config, rng: np.random.Ge
     spreading, each on its own fresh SimulationSession, scored by `experiments.criticality`.
     A rule with no birth or no survive condition can never produce or sustain life — scored 0
     without spending a simulation on it, matching the legacy short-circuit. Freeze detection
-    uses `discovery.freeze_window` (legacy: 100), which config validation keeps short enough
-    for a freeze to be detectable within `discovery.steps`."""
+    uses `discovery.freeze_window` (legacy: 100), which the `discover` command checks is short
+    enough for a freeze to be detectable within `discovery.steps`
+    (`config.validate_discovery_config`)."""
     if not rule.birth or not rule.survive:
         return 0.0
 
