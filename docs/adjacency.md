@@ -66,7 +66,9 @@ same-orientation triangle edge.
 
 Generalizes the legacy hex/tri gather to every shape: pad the flat grid with one sentinel slot,
 remap `-1` adjacency indices to the sentinel, `padded[adjacency]` then reduce. `convolve2d` and
-scipy are gone (§6.1). Connected-component clustering (§6.6) reuses the same adjacency array via
-iterative min-label propagation, so it is geometry-correct and wrap-correct by construction for
-all three shapes — `scipy.ndimage` is not used since its 4/8-connectivity has no hex/tri notion
-and no torus support.
+scipy are gone (§6.1). Connected-component clustering (§6.6) reuses the same adjacency array, as
+the edge list of a vectorised union-find (`session.metrics.component_roots`: hook roots, then
+pointer-jump), so it is geometry-correct and wrap-correct by construction for all three shapes —
+`scipy.ndimage` is not used since its 4/8-connectivity has no hex/tri notion and no torus
+support. Union-find replaced the spec's min-label propagation, which needed one full-grid pass
+per cell along a cluster's longest internal path (seconds per call on large winding clusters).

@@ -1,7 +1,18 @@
 """LatticeGrid: state arrays + the one update rule (§6.3). There is exactly one update
 implementation in this codebase; geometry enters only via the adjacency array from
-`core.geometries`. Legacy semantics (birth/survival/kill-attribution) are preserved, with the
-legacy per-cell Python loops replaced by vectorized numpy (§6.3 steps 2 and 4).
+`core.geometries`. Legacy birth and survival semantics are preserved, with the legacy per-cell
+Python loops replaced by vectorized numpy (§6.3 steps 2 and 4).
+
+Kill attribution (§6.3 step 4) deliberately departs from legacy `square_grid.py`. The spec
+credits "each overcrowding death" to a foreign species holding more than half of the dead cell's
+neighbours, but never defines overcrowding. Legacy read it as the species' *own* neighbour count
+exceeding max(S). Survival depends only on the own count, so that reading needs own > max(S) and
+foreign > total/2 at once, i.e. a degree of at least 2*max(S) + 3: no kill could ever be recorded
+for B3/S23 on squares, B2/S34 on hexagons or B46/S345 on edge+vertex triangles. And with an
+empty S (max(S) taken as -1) every isolation death counted as overcrowding. Here a death is an
+overcrowding death when the cell's live neighbours of *all* species exceed max(S) (more
+neighbours than the species can survive among), and the majority test is unchanged. Species
+with an empty S die whatever their surroundings, so their deaths are never credited.
 """
 
 from __future__ import annotations
@@ -11,6 +22,10 @@ import numpy as np
 from latticelife.core.geometries import build_adjacency
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.results import UpdateResult
+
+# Lifespans saturate here instead of wrapping to a negative int32 (static counts, avg_lifespan
+# and the static shade all compare lifespans against a positive threshold).
+LIFESPAN_MAX = int(np.iinfo(np.int32).max)
 
 
 class LatticeGrid:
@@ -97,27 +112,20 @@ class LatticeGrid:
         np.add.at(births, chosen_ids[any_eligible], 1)
 
         # --- Survival / death + kill attribution (§6.3 steps 3-4), per species. ---
+        survived = np.zeros(n, dtype=bool)
         for i, lf in enumerate(lifeforms):
             alive_mask = self.occupancy == lf.id
             survive_mask = alive_mask & np.isin(counts[i], list(lf.rule.survive))
             death_mask = alive_mask & ~survive_mask
 
-            new_lifespans[survive_mask] += 1
+            survived |= survive_mask
             new_occupancy[death_mask] = 0
             new_lifespans[death_mask] = 0
-            deaths[lf.id] = int(np.sum(death_mask))
+            deaths[lf.id] = int(np.count_nonzero(death_mask))
+            _credit_kills(i, lf, death_mask, counts, total_neighbors, ids, kills)
 
-            max_survive = max(lf.rule.survive) if lf.rule.survive else -1
-            overcrowd = death_mask & (counts[i] > max_survive)
-            if np.any(overcrowd):
-                counts_excl_self = counts.copy()
-                counts_excl_self[i] = -1
-                killer_row = np.argmax(counts_excl_self, axis=0)
-                killer_vals = counts_excl_self[killer_row, np.arange(n)]
-                majority = killer_vals > (total_neighbors / 2)
-                credit = overcrowd & majority
-                if np.any(credit):
-                    np.add.at(kills, ids[killer_row][credit], 1)
+        # Survivors age by one, saturating at LIFESPAN_MAX rather than wrapping negative.
+        np.add(new_lifespans, 1, out=new_lifespans, where=survived & (new_lifespans < LIFESPAN_MAX))
 
         changed_cells = int(np.sum(new_occupancy != self.occupancy))
 
@@ -132,6 +140,32 @@ class LatticeGrid:
             static[lf.id] = int(np.sum(alive_mask & (self.lifespans > self.static_threshold)))
 
         return UpdateResult(births, deaths, kills, alive, static, changed_cells)
+
+
+def _credit_kills(
+    i: int,
+    lifeform: Lifeform,
+    death_mask: np.ndarray,
+    counts: np.ndarray,
+    total_neighbors: np.ndarray,
+    ids: np.ndarray,
+    kills: np.ndarray,
+) -> None:
+    """§6.3 step 4, for the deaths of `lifeform` (row `i` of `counts`): a death is an
+    overcrowding death when the cell's live neighbours of all species exceed max(S), and it is
+    credited to the foreign species with the most neighbours there iff that count is more than
+    half of all live neighbours (so the killer is unique). See the module docstring for why
+    overcrowding counts every species and why an empty S is never credited."""
+    if not lifeform.rule.survive or len(ids) < 2:
+        return
+    overcrowded = np.flatnonzero(death_mask & (total_neighbors > max(lifeform.rule.survive)))
+    if overcrowded.size == 0:
+        return
+    foreign = np.delete(counts[:, overcrowded], i, axis=0)  # (L-1, m)
+    killer_row = foreign.argmax(axis=0)
+    killer_count = foreign.max(axis=0)
+    credited = 2 * killer_count > total_neighbors[overcrowded]
+    np.add.at(kills, np.delete(ids, i)[killer_row[credited]], 1)
 
 
 def clone_grid(grid: LatticeGrid) -> LatticeGrid:

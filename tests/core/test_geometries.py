@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pytest
 from hypothesis import given
@@ -226,3 +228,58 @@ def test_wrapped_update_commutes_with_parity_preserving_translation(
     shifted_then_stepped = step(_shift(start, width, height, dr, dc))
     stepped_then_shifted = _shift(step(start), width, height, dr, dc)
     assert np.array_equal(shifted_then_stepped, stepped_then_shifted)
+
+
+# --- orientation pins (F62) --------------------------------------------------------------------
+# Degree and symmetry checks pass for a mirrored layout too (even-q hexagons, or triangles
+# pointing the other way), so these compare the adjacency with the documented drawing: odd-q
+# hexagons (odd columns shifted down half a cell) and triangles pointing up where (r + c) is
+# even. The layouts are written out here, independently of core.geometries and ui.render.
+
+
+def _hex_centre(r: int, c: int) -> tuple[float, float]:
+    return 1.5 * c, math.sqrt(3) * (r + 0.5 * (c % 2))  # unit circumradius
+
+
+def _triangle_corners(r: int, c: int) -> set[tuple[float, float]]:
+    x, y, h = c / 2, r * math.sqrt(3) / 2, math.sqrt(3) / 2  # unit side
+    tip, base = (y - h / 2, y + h / 2) if (r + c) % 2 == 0 else (y + h / 2, y - h / 2)
+    return {(round(px, 6), round(py, 6)) for px, py in ((x, tip), (x - 0.5, base), (x + 0.5, base))}
+
+
+def _neighbour_sets(shape: str, triangle_mode: str, width: int, height: int) -> list[set[int]]:
+    adjacency = build_adjacency(shape, width, height, False, triangle_mode)
+    return [{int(j) for j in row if j >= 0} for row in adjacency]
+
+
+def test_hexagon_adjacency_is_odd_q():
+    width, height = 7, 6
+    cells = [divmod(i, width) for i in range(width * height)]
+    neighbour_sets = _neighbour_sets("hexagon", "edge+vertex", width, height)
+    for i, neighbours in enumerate(neighbour_sets):
+        xi, yi = _hex_centre(*cells[i])
+        touching = {
+            j
+            for j, (r, c) in enumerate(cells)
+            if j != i and math.isclose(math.dist((xi, yi), _hex_centre(r, c)), math.sqrt(3))
+        }
+        assert neighbours == touching, cells[i]
+
+    # Spelled out: (r=0, c=1), an odd column, touches (1, 0) and (1, 2) diagonally below it;
+    # (1, 2), an even column, touches (0, 1) and (0, 3) diagonally above it.
+    assert {1 * width + 0, 1 * width + 2} <= neighbour_sets[0 * width + 1]
+    assert {0 * width + 1, 0 * width + 3} <= neighbour_sets[1 * width + 2]
+
+
+@pytest.mark.parametrize(("triangle_mode", "shared_corners"), [("edge", 2), ("edge+vertex", 1)])
+def test_triangle_adjacency_matches_the_drawn_tiling(triangle_mode, shared_corners):
+    width, height = 8, 6
+    cells = [divmod(i, width) for i in range(width * height)]
+    corners = [_triangle_corners(r, c) for r, c in cells]
+    for i, neighbours in enumerate(_neighbour_sets("triangle", triangle_mode, width, height)):
+        touching = {
+            j
+            for j in range(len(cells))
+            if j != i and len(corners[i] & corners[j]) >= shared_corners
+        }
+        assert neighbours == touching, cells[i]
