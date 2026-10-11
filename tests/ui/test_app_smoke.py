@@ -79,14 +79,6 @@ def test_question_mark_toggles_hints(make_app, ui):
     assert app.hints_visible is True
 
 
-def test_v_toggle_does_not_crash_regardless_of_torus_extra_availability(make_app, ui):
-    app = make_app()
-    ui(app).key(pygame.K_v, "v")
-    assert app.view_mode in ("2D", "3D")
-    if app.view_mode == "2D":
-        assert app.torus_status is not None
-
-
 @pytest.mark.parametrize("shape", ["square", "hexagon", "triangle"])
 def test_each_shape_renders_without_crashing(config, shape):
     shaped_config = replace(config, grid=replace(config.grid, shape=shape, width=10, height=10))

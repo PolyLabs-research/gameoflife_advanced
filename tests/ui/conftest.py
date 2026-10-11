@@ -98,7 +98,9 @@ def config():
 @pytest.fixture
 def make_app(config):
     """`make_app(grid={...}, simulation={...}, ui={...})`: an App on the default config with
-    those fields replaced, its clock a `FakeClock` of one generation per frame."""
+    those fields replaced, its clock a `FakeClock` of one generation per frame. Each app is
+    closed at teardown (releasing a 3D view's GL context)."""
+    apps: list[App] = []
 
     def make(**sections) -> App:
         changed = config
@@ -106,9 +108,12 @@ def make_app(config):
             changed = replace(changed, **{name: replace(getattr(changed, name), **values)})
         app = App(changed)
         app.clock = FakeClock(frame_ms(changed.ui.fps))
+        apps.append(app)
         return app
 
-    return make
+    yield make
+    for app in apps:
+        app.close()
 
 
 @pytest.fixture

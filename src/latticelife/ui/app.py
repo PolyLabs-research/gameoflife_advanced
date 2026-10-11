@@ -21,11 +21,21 @@ seen before the rule acts on it (legacy click parity).
 New (N) gives every current species a fresh random rule sized to the shape's neighbour count and
 re-seeds the grid; Reset (R) keeps the rules and re-seeds. The help overlay ('?' on any keyboard
 layout, or F1) is modal: while it is open, input does nothing else, and a click closes it.
+
+3D view (V, `[torus]` extra). The grid area shows the grid on a torus (`ui/torus/view.py`),
+rendered offscreen and blitted, so the window stays a normal pygame surface and the panel, chart
+and overlays work unchanged. It follows the live session every frame — Apply, New, Reset and
+window resizes need no rebuild. A drag on the torus rotates it and the wheel over it zooms;
+grid clicks edit cells in 2D only. Leaving 3D (V again, or exiting) releases every GL object.
+If 3D cannot start, or fails while drawing, the app stays in (or returns to) 2D and a short
+status line between the chart and the grid says why for `STATUS_SECONDS`.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pygame
@@ -40,6 +50,9 @@ from latticelife.ui import render
 from latticelife.ui.panel import SettingsPanel, ui_rng
 from latticelife.ui.widgets import Button, blit_clipped
 
+if TYPE_CHECKING:  # never imported at run time: the [torus] extra is optional
+    from latticelife.ui.torus.view import TorusView
+
 WINDOW_WIDTH = 1200
 WINDOW_HEIGHT = 800
 
@@ -53,6 +66,8 @@ MAX_FRAME_SECONDS = 0.25
 EDIT_HOLD_SECONDS = 0.25
 # Key repeat (delay, interval in ms) while a settings field has focus.
 TEXT_KEY_REPEAT = (400, 35)
+# How long the 3D view's status message stays up.
+STATUS_SECONDS = 6.0
 
 BACKGROUND_COLOR = (18, 18, 24)
 PANEL_BACKGROUND_COLOR = (24, 26, 32)
@@ -73,7 +88,8 @@ SHORTCUTS = [
     ("S", "Step forward (when paused)"),
     ("Click", "Place / remove the chosen species (2D)"),
     ("1-9, 0", "Choose the species clicks place"),
-    ("V", "Toggle 2D / 3D view"),
+    ("V", "Toggle 2D / 3D torus view"),
+    ("Drag, wheel", "Rotate / zoom the torus (3D)"),
     ("Wheel", "Scroll the settings panel"),
     ("? or F1", "Toggle this help"),
 ]
@@ -151,6 +167,12 @@ def _fit_text(font: pygame.font.Font, text: str, max_width: int) -> str:
     while text and font.size(text + "…")[0] > max_width:
         text = text[:-1]
     return text + "…"
+
+
+def _short_error(exc: BaseException) -> str:
+    """The first line of an exception's message (its type name if it has none)."""
+    lines = str(exc).strip().splitlines()
+    return lines[0] if lines else type(exc).__name__
 
 
 def _alert_label(alert: Alert | None) -> str:
@@ -281,6 +303,10 @@ def _draw_keyboard_hints(
 
 class App:
     def __init__(self, config: Config) -> None:
+        # The 3D view renders with an OpenGL context of its own. On some Linux GPUs SDL would
+        # present this (non-GL) window through a hidden GL context, and the two would compete
+        # for the thread; this keeps SDL on its plain framebuffer (unless the user set it).
+        os.environ.setdefault("SDL_FRAMEBUFFER_ACCELERATION", "0")
         pygame.init()
         pygame.display.set_caption("LatticeLife")
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE)
@@ -300,8 +326,11 @@ class App:
 
         self.hints_visible = False
         self.view_mode = "2D"
+        # The 3D view (a `ui.torus.view.TorusView`) while view_mode is "3D", else None, and the
+        # status message about it with the seconds it has left on screen.
+        self.torus_view: TorusView | None = None
         self.torus_status: str | None = None
-        self.torus_renderer = None
+        self._torus_status_left = 0.0
 
         self.palette = render.build_palette(self.lifeforms)
         self.geometric_renderer = render.GeometricRenderer(BACKGROUND_COLOR)
@@ -345,6 +374,7 @@ class App:
         self._frame_seconds = 0.0  # this frame owes no time to the new session
         self._edit_hold = 0.0
         self.geometric_renderer.reset()
+        self._set_torus_status(None)  # the user has moved on
 
     def _reset(self) -> None:
         self.session.reset()
@@ -398,28 +428,46 @@ class App:
         panel.species_colors = [tuple(int(c) for c in self.palette[lf.id]) for lf in self.lifeforms]
         panel.selected_species = self.selected_species
 
+    def _set_torus_status(self, message: str | None) -> None:
+        self.torus_status = message
+        self._torus_status_left = STATUS_SECONDS if message is not None else 0.0
+
     def _toggle_view_mode(self) -> None:
         if self.view_mode == "3D":
-            self.view_mode = "2D"
-            self.torus_renderer = None
+            self._leave_3d()
             return
 
         try:
-            from latticelife.ui.torus.torus_renderer import TorusRenderer
+            # Lazy: the [torus] extra (moderngl) is optional and only needed from here on.
+            from latticelife.ui.torus.view import TorusView
         except ImportError:
-            self.torus_status = "3D view unavailable: install the [torus] extra (moderngl, pyrr)."
+            self._set_torus_status(
+                "3D view unavailable: install the [torus] extra (uv sync --extra torus)."
+            )
             return
 
         try:
-            self.torus_renderer = TorusRenderer(
-                self.screen, (self.config.grid.width, self.config.grid.height), self.palette
-            )
-        except Exception as exc:  # pragma: no cover - requires a real GL context
-            self.torus_status = f"3D view unavailable: {exc}"
+            view = TorusView(BACKGROUND_COLOR)
+        except Exception as exc:  # no OpenGL 3.3, a driver that rejects the shaders, ...
+            self._set_torus_status(f"3D view unavailable: {_short_error(exc)}")
             return
 
+        self.torus_view = view
         self.view_mode = "3D"
-        self.torus_status = None
+        self._set_torus_status(None)
+
+    def _leave_3d(self, status: str | None = None) -> None:
+        """Back to 2D, releasing the 3D view's GL resources."""
+        view, self.torus_view = self.torus_view, None
+        self.view_mode = "2D"
+        self._set_torus_status(status)
+        if view is not None:
+            view.release()
+
+    def close(self) -> None:
+        """Release what the app holds outside pygame (the 3D view's GL context)."""
+        if self.torus_view is not None:
+            self._leave_3d()
 
     # --- events ------------------------------------------------------------
 
@@ -448,6 +496,11 @@ class App:
             if event.type == pygame.KEYDOWN:
                 if self._handle_keydown(event):
                     continue
+
+            if self.torus_view is not None:
+                # 3D: a drag on the torus rotates it, the wheel over it zooms.
+                self.torus_view.handle_event(event, self.layout.grid_rect())
+                continue
 
             if (
                 event.type == pygame.MOUSEBUTTONDOWN
@@ -537,6 +590,8 @@ class App:
     # --- drawing -------------------------------------------------------------
 
     def _footer_hint(self) -> str:
+        if self.torus_view is not None:
+            return "Drag to rotate · wheel to zoom · V for 2D   ·   Press ? for shortcuts"
         if len(self.lifeforms) > 1:
             return f"Clicks place species {self.selected_species}   ·   Press ? for shortcuts"
         return "Press ? for shortcuts"
@@ -571,16 +626,14 @@ class App:
         _draw_population_chart(self.screen, chart_rect, self.session, self.palette)
         _draw_alert_banner(self.screen, self.fonts, chart_rect, self.session.alert)
 
-        if self.view_mode == "3D" and self.torus_renderer is not None:
-            grid = self.session.grid
-            self.torus_renderer.update_texture(grid.occupancy, grid.lifespans)
-            self.torus_renderer.render()
+        if self.torus_view is not None:
+            self._draw_torus()
         else:
             self._draw_grid()
 
-        if self.torus_status is not None:
-            status_surf = self.fonts.get("sm").render(self.torus_status, True, ACCENT_DANGER)
-            self.screen.blit(status_surf, (self.layout.grid_x, self.layout.window_height - 28))
+        status = self._torus_status_text()
+        if status is not None:
+            self.screen.blit(*status)
 
         _draw_keyboard_hints(
             self.screen,
@@ -604,6 +657,31 @@ class App:
         else:
             self.geometric_renderer.draw(self.screen, grid, self.palette, layout)
         self.screen.set_clip(previous_clip)
+
+    def _draw_torus(self) -> None:
+        """The torus over the grid area; if the GL side fails, back to 2D with the reason."""
+        assert self.torus_view is not None
+        try:
+            self.torus_view.draw(
+                self.screen, self.layout.grid_rect(), self.session.grid, self.palette
+            )
+        except Exception as exc:  # a lost GPU, a grid larger than a GL texture, ...
+            self._leave_3d(f"3D view stopped: {_short_error(exc)}")
+            self._draw_grid()
+
+    def _torus_status_text(self) -> tuple[pygame.Surface, pygame.Rect] | None:
+        """The status message and where it goes: the strip between the chart and the grid area,
+        so it never covers cells or the chart."""
+        if self.torus_status is None:
+            return None
+        chart_rect = self.layout.chart_rect()
+        font = self.fonts.get("sm")
+        text = font.render(
+            _fit_text(font, self.torus_status, chart_rect.width), True, ACCENT_DANGER
+        )
+        strip_top = chart_rect.bottom
+        strip_height = self.layout.grid_y - strip_top
+        return text, text.get_rect(left=chart_rect.x, centery=strip_top + strip_height // 2)
 
     # --- main loop -------------------------------------------------------------
 
@@ -638,11 +716,18 @@ class App:
         self._draw()
         pygame.display.flip()
         self._frame_seconds = min(self.clock.tick(UI_FPS) / 1000.0, MAX_FRAME_SECONDS)
+        if self.torus_status is not None:
+            self._torus_status_left -= self._frame_seconds
+            if self._torus_status_left <= 0:
+                self._set_torus_status(None)
         return running
 
     def run(self) -> None:
-        while self.step_frame():
-            pass
+        try:
+            while self.step_frame():
+                pass
+        finally:
+            self.close()
 
 
 def main(config_path: str = str(DEFAULT_CONFIG_PATH)) -> None:
