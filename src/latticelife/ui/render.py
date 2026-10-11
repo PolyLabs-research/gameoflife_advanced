@@ -3,10 +3,10 @@
 corner/position math survives here as plain functions.
 
 Square rendering is a single vectorized palette-lookup blit per frame, not 40k individual draw
-calls. Hex/triangle cells are polygons kept on a persistent offscreen surface: a full geometric
-draw on the first frame (and on reset, resize, shape or palette change), then only the cells
-whose palette index changed since the previous frame are redrawn into it — and the whole surface
-is blitted to the screen every frame, so cells that did not change stay visible.
+calls. Hex/triangle cells are kept on a persistent offscreen image: a full geometric draw on the
+first frame (and on reset, resize, shape or palette change), then only the cells whose palette
+index changed since the previous frame are redrawn into it — and the whole image is blitted to
+the screen every frame, so cells that did not change stay visible.
 
 `GridLayout` is the single description of where a grid's cells are on screen. Drawing and click
 picking (`GridLayout.cell_at`) both go through it, so a click always lands on the cell drawn
@@ -14,9 +14,17 @@ under the pointer, for every shape. The layout places the polygons' bounding box
 area it was fitted to: a hexagon or triangle reaches half a cell beyond its centre, so the first
 cell's centre sits that far in from the area's corner, never on it.
 
-Very large hexagon/triangle grids (cells smaller than `MIN_POLYGON_SIZE` px) are drawn offscreen
-at that size and scaled down to fit, and cells under `MIN_OUTLINE_SIZE` px get no outline (a
-1-px outline would cover a tiny cell's fill entirely).
+Hex/triangle drawing and picking share one rasterised geometry. `rasterise` gives each pixel
+the cell under the pixel's centre — the very lookup `cell_at` makes for a click on that pixel —
+and a cell is drawn by painting exactly its pixels. (`pygame.draw.polygon` was not used for
+this: it truncates float corners and fills both ends of every span, so its polygons sat up to a
+pixel up-left of the geometry, overlapped their neighbours, and a click near an edge toggled the
+neighbour of the cell drawn under it.) Cell edges get a 1-px outline from the same raster.
+
+Very large hexagon/triangle grids (cells smaller than `MIN_POLYGON_SIZE` px) are sampled more
+finely than the screen, a whole number of samples per pixel each way, and averaged down to fit;
+cells under `MIN_OUTLINE_SIZE` px get no outline (a 1-px outline would cover a tiny cell's fill
+entirely).
 """
 
 from __future__ import annotations
@@ -35,12 +43,16 @@ DEAD_CELL_COLOR = (32, 34, 42)
 GRID_LINE_COLOR = (45, 48, 58)
 
 SQRT3 = math.sqrt(3)
-# Hex/triangle cells smaller than this are drawn at this size offscreen and scaled down.
+# Hex/triangle cells smaller than this many px are sampled at least this finely offscreen (a
+# whole number of samples per pixel each way) and averaged down. A cell this big holds at least
+# one sample point: even a triangle's inscribed circle is then wider than a pixel's diagonal.
 MIN_POLYGON_SIZE = 3.0
 # Hex/triangle cells smaller than this are drawn without an outline.
 MIN_OUTLINE_SIZE = 4.0
 # Smallest cell size a layout is given, so a vanishing grid area cannot divide by zero.
 _MIN_FIT = 0.05
+# Samples looked up per batch while rasterising, which bounds the lookup's scratch memory.
+_RASTER_BATCH = 1 << 18
 
 # Ported from the legacy settings.py LIFEFORM_COLORS_ALIVE / LIFEFORM_COLORS_STATIC.
 ALIVE_COLORS = [
@@ -164,14 +176,19 @@ class GridLayout:
     def rect(self) -> pygame.Rect:
         return pygame.Rect((self.left, self.top), self.pixel_size)
 
-    def _origin(self) -> tuple[float, float]:
-        """The corner-math offset (`hexagon_corners`/`triangle_corners`) that puts the
-        polygons' bounding box at (left, top)."""
+    def _footprint_origin(self) -> tuple[float, float]:
+        """Cell (0, 0)'s corner-math offset (`hexagon_corners`/`triangle_corners`) from the
+        footprint's top-left corner: it puts the polygons' bounding box at that corner."""
         if self.shape == "hexagon":
-            return self.left + self.cell_size, self.top + SQRT3 / 2 * self.cell_size
+            return self.cell_size, SQRT3 / 2 * self.cell_size
         if self.shape == "triangle":
-            return self.left + self.cell_size / 2, self.top + SQRT3 / 4 * self.cell_size
-        return float(self.left), float(self.top)
+            return self.cell_size / 2, SQRT3 / 4 * self.cell_size
+        return 0.0, 0.0
+
+    def _origin(self) -> tuple[float, float]:
+        """The corner-math offset in window pixels."""
+        ox, oy = self._footprint_origin()
+        return self.left + ox, self.top + oy
 
     def corners(self, row: int, col: int) -> list[tuple[float, float]]:
         ox, oy = self._origin()
@@ -193,58 +210,145 @@ class GridLayout:
         )
 
     def cell_at(self, x: float, y: float) -> int | None:
-        """The flat index of the cell drawn at pixel (x, y), or None outside the grid."""
-        ox, oy = self._origin()
-        lx, ly = x - ox, y - oy
-        if self.shape == "hexagon":
-            row, col = _hex_at(lx, ly, self.cell_size)
-        elif self.shape == "triangle":
-            row, col = _triangle_at(lx, ly, self.cell_size)
-        else:
+        """The flat index of the cell drawn at window pixel (x, y), or None where no cell is
+        drawn; a fractional position picks the pixel it lies in. A square-grid pixel shows the
+        cell `render_square`'s nearest-neighbour scale puts there, a hexagon/triangle pixel the
+        cell under the pixel's centre — the point `rasterise` looks up to draw it."""
+        i, j = math.floor(x) - self.left, math.floor(y) - self.top
+        if self.shape == "square":
             pixel_w, pixel_h = self.pixel_size
-            col = math.floor(lx * self.width / pixel_w)
-            row = math.floor(ly * self.height / pixel_h)
-        if 0 <= row < self.height and 0 <= col < self.width:
-            return row * self.width + col
-        return None
+            col = math.floor(i * self.width / pixel_w)
+            row = math.floor(j * self.height / pixel_h)
+            if 0 <= row < self.height and 0 <= col < self.width:
+                return row * self.width + col
+            return None
+        index = int(self.cells_at(i + 0.5, j + 0.5))
+        return index if index >= 0 else None
+
+    def cells_at(self, fx, fy) -> np.ndarray:
+        """Hexagon/triangle grids: the flat index of the cell containing each point (fx, fy),
+        given in px from the footprint's top-left corner, or -1 where no cell does. Vectorized:
+        the points may be scalars or arrays of one shape, and every point is looked up with the
+        same float operations, so a pixel is drawn and picked as the same cell."""
+        ox, oy = self._footprint_origin()
+        lx = np.asarray(fx, dtype=np.float64) - ox
+        ly = np.asarray(fy, dtype=np.float64) - oy
+        if self.shape == "hexagon":
+            rows, cols = _hex_cells(lx, ly, self.cell_size)
+        elif self.shape == "triangle":
+            rows, cols = _triangle_cells(lx, ly, self.cell_size)
+        else:
+            raise ValueError(f"cells_at is for hexagon and triangle grids, not {self.shape}")
+        inside = (rows >= 0) & (rows < self.height) & (cols >= 0) & (cols < self.width)
+        return np.where(inside, rows * self.width + cols, -1)
 
 
-def _hex_at(lx: float, ly: float, size: float) -> tuple[int, int]:
-    """(row, col) of the hexagon containing (lx, ly), relative to cell (0, 0)'s centre, on the
-    unbounded odd-q lattice. Regular hexagons tile as the Voronoi cells of their centres, so the
-    nearest centre among the neighbouring candidates is the containing cell."""
-    q0 = round(lx / (1.5 * size))
-    best: tuple[float, int, int] | None = None
-    for q in (q0 - 1, q0, q0 + 1):
+def _hex_cells(lx, ly, size: float) -> tuple[np.ndarray, np.ndarray]:
+    """(rows, cols) of the hexagons containing the points (lx, ly), relative to cell (0, 0)'s
+    centre, on the unbounded odd-q lattice. Regular hexagons tile as the Voronoi cells of their
+    centres, so the nearest centre among the neighbouring candidates is the containing cell (on
+    a tie, the first candidate in the order below)."""
+    lx = np.asarray(lx, dtype=np.float64)
+    ly = np.asarray(ly, dtype=np.float64)
+    q0 = np.round(lx / (1.5 * size)).astype(np.int64)
+    best = np.full(lx.shape, np.inf)
+    rows = np.zeros(lx.shape, dtype=np.int64)
+    cols = np.zeros(lx.shape, dtype=np.int64)
+    for dq in (-1, 0, 1):
+        q = q0 + dq
         shift = 0.5 * (q & 1)
-        r0 = round(ly / (SQRT3 * size) - shift)
-        for r in (r0 - 1, r0, r0 + 1):
+        r0 = np.round(ly / (SQRT3 * size) - shift).astype(np.int64)
+        for dr in (-1, 0, 1):
+            r = r0 + dr
             dx = lx - 1.5 * size * q
             dy = ly - SQRT3 * size * (r + shift)
             distance = dx * dx + dy * dy
-            if best is None or distance < best[0]:
-                best = (distance, r, q)
-    assert best is not None
-    return best[1], best[2]
+            closer = distance < best
+            best = np.where(closer, distance, best)
+            rows = np.where(closer, r, rows)
+            cols = np.where(closer, q, cols)
+    return rows, cols
+
+
+def _triangle_cells(lx, ly, size: float) -> tuple[np.ndarray, np.ndarray]:
+    """(rows, cols) of the triangles containing the points (lx, ly), relative to cell (0, 0)'s
+    midpoint, on the unbounded lattice: the row from y, then the column whose up/down triangle
+    contains the point most deeply (ties on a shared edge go to the left cell)."""
+    lx = np.asarray(lx, dtype=np.float64)
+    ly = np.asarray(ly, dtype=np.float64)
+    tri_h = SQRT3 / 2 * size
+    rows = np.floor((ly + tri_h / 2) / tri_h).astype(np.int64)
+    depth = (ly - (rows * tri_h - tri_h / 2)) / tri_h  # 0 at the row's top edge, 1 at its bottom
+    c0 = np.floor(lx / (size / 2)).astype(np.int64)
+    best = np.full(lx.shape, -np.inf)
+    cols = np.zeros(lx.shape, dtype=np.int64)
+    for dc in (-1, 0, 1, 2):
+        col = c0 + dc
+        upward = (rows + col) % 2 == 0
+        half_width = np.where(upward, depth, 1 - depth) * size / 2
+        margin = half_width - np.abs(lx - col * size / 2)
+        deeper = margin > best
+        best = np.where(deeper, margin, best)
+        cols = np.where(deeper, col, cols)
+    return rows, cols
+
+
+def _hex_at(lx: float, ly: float, size: float) -> tuple[int, int]:
+    """`_hex_cells` for one point, as plain ints."""
+    rows, cols = _hex_cells(lx, ly, size)
+    return int(rows), int(cols)
 
 
 def _triangle_at(lx: float, ly: float, size: float) -> tuple[int, int]:
-    """(row, col) of the triangle containing (lx, ly), relative to cell (0, 0)'s midpoint, on
-    the unbounded lattice: the row from y, then the column whose up/down triangle contains the
-    point most deeply (ties on a shared edge go to the left cell)."""
-    tri_h = SQRT3 / 2 * size
-    row = math.floor((ly + tri_h / 2) / tri_h)
-    depth = (ly - (row * tri_h - tri_h / 2)) / tri_h  # 0 at the row's top edge, 1 at its bottom
-    c0 = math.floor(lx / (size / 2))
-    best: tuple[float, int] | None = None
-    for col in (c0 - 1, c0, c0 + 1, c0 + 2):
-        upward = (row + col) % 2 == 0
-        half_width = (depth if upward else 1 - depth) * size / 2
-        margin = half_width - abs(lx - col * size / 2)
-        if best is None or margin > best[0]:
-            best = (margin, col)
-    assert best is not None
-    return row, best[1]
+    """`_triangle_cells` for one point, as plain ints."""
+    rows, cols = _triangle_cells(lx, ly, size)
+    return int(rows), int(cols)
+
+
+def samples_per_pixel(cell_size: float) -> int:
+    """How many samples per pixel, each way, a hex/triangle grid of `cell_size` px cells is
+    rasterised with: 1, or for cells under `MIN_POLYGON_SIZE` px the fewest that make every
+    cell at least that many samples across."""
+    if cell_size >= MIN_POLYGON_SIZE:
+        return 1
+    return math.ceil(MIN_POLYGON_SIZE / cell_size)
+
+
+def rasterise(layout: GridLayout, samples: int = 1) -> np.ndarray:
+    """The flat index of the cell at every sample of a hex/triangle layout's footprint (-1 where
+    there is none), as a (samples * px width, samples * px height) int32 array in pygame's
+    (x, y) order. Sample (i, j) is the point ((i + 0.5) / samples, (j + 0.5) / samples) px from
+    the footprint's top-left corner; at one sample per pixel that is the pixel's centre, the
+    very point `GridLayout.cell_at` looks up for a click on that pixel."""
+    pixel_w, pixel_h = layout.pixel_size
+    width, height = pixel_w * samples, pixel_h * samples
+    cells = np.empty((width, height), dtype=np.int32)
+    ys = (np.arange(height) + 0.5) / samples
+    step = max(1, _RASTER_BATCH // height)
+    for x0 in range(0, width, step):
+        xs = (np.arange(x0, min(x0 + step, width)) + 0.5) / samples
+        fx, fy = np.meshgrid(xs, ys, indexing="ij")
+        cells[x0 : x0 + step] = layout.cells_at(fx, fy)
+    return cells
+
+
+def _outline(cells: np.ndarray) -> np.ndarray:
+    """The pixels of a 1-px line along every cell edge in a `rasterise` array: each cell pixel
+    whose left or upper neighbour is another cell or none (so a shared edge is drawn once, on
+    one side of it) or whose right or lower neighbour is none (so the grid's border is closed
+    on every side). A cell that would be all outline keeps its pixels."""
+    padded = np.pad(cells, 1, constant_values=-1)
+    inner = padded[1:-1, 1:-1]
+    left, right = padded[:-2, 1:-1], padded[2:, 1:-1]
+    up, down = padded[1:-1, :-2], padded[1:-1, 2:]
+    outline = (inner >= 0) & ((left != inner) | (up != inner) | (right < 0) | (down < 0))
+    n_cells = int(cells.max()) + 1
+    if n_cells > 0:
+        kept = np.bincount(cells[~outline & (cells >= 0)], minlength=n_cells)
+        starved = kept == 0
+        if starved.any():
+            outline &= ~starved[np.maximum(cells, 0)]
+    return outline
 
 
 def fit_grid(shape: str, width: int, height: int, area: pygame.Rect) -> GridLayout:
@@ -299,46 +403,72 @@ def render_square(
     surface.blit(scaled, (offset_x, offset_y))
 
 
-def _all_corners(layout: GridLayout) -> np.ndarray:
-    """Every cell's polygon at once, (n_cells, k, 2) float — the vectorized twin of
-    `GridLayout.corners`."""
-    rows, cols = np.divmod(np.arange(layout.width * layout.height), layout.width)
-    ox, oy = layout._origin()
-    size = layout.cell_size
-    if layout.shape == "hexagon":
-        cx = size * 1.5 * cols + ox
-        cy = size * SQRT3 * (rows + 0.5 * (cols & 1)) + oy
-        angles = np.radians(60 * np.arange(6))
-        xs = cx[:, None] + size * np.cos(angles)[None, :]
-        ys = cy[:, None] + size * np.sin(angles)[None, :]
-        return np.stack([xs, ys], axis=-1)
-    x0 = cols * (size / 2) + ox
-    y0 = rows * (size * SQRT3 / 2) + oy
-    half, tri_h = size / 2, size * SQRT3 / 2
-    flip = np.where((rows + cols) % 2 == 0, 1.0, -1.0)  # +1 upward, -1 downward
-    xs = np.stack([x0, x0 - half, x0 + half], axis=1)
-    ys = np.stack([y0 - flip * tri_h / 2, y0 + flip * tri_h / 2, y0 + flip * tri_h / 2], axis=1)
-    return np.stack([xs, ys], axis=-1)
-
-
 class GeometricRenderer:
-    """Hex/triangle draw state (§6.14): a persistent offscreen surface holding every cell's
-    polygon, fully redrawn the first time and whenever the grid, cell size or palette changes
-    (or after `reset()`), otherwise updated only where a cell's palette index changed since the
-    previous frame. Each `draw` blits the whole surface — scaled down when cells are below
-    `MIN_POLYGON_SIZE` px — so the grid is complete on every frame."""
+    """Hex/triangle draw state (§6.14). On the first draw for a grid shape, size and cell size,
+    the footprint is rasterised (`rasterise`, one sample per pixel unless cells are under
+    `MIN_POLYGON_SIZE` px), its outline and background are painted once into a persistent
+    offscreen image, and each cell's samples are listed. A draw paints whole cells into that
+    image: every cell the first time and whenever the geometry or palette changes (or after
+    `reset()`), otherwise only the cells whose palette index changed since the previous frame.
+    Each `draw` blits the whole image — averaged down to the screen when it was sampled more
+    finely — so the grid is complete on every frame."""
 
     def __init__(self, background: tuple[int, int, int] = (0, 0, 0)) -> None:
         self.background = background
+        self._geometry: tuple | None = None
+        self._samples = 1
+        # Every fill sample's flat index in `_pixels`, grouped by cell: cell k's samples are
+        # _order[_starts[k]:_starts[k + 1]]. Outline and background samples are in no group.
+        self._order: np.ndarray | None = None
+        self._starts: np.ndarray | None = None
+        self._pixels: np.ndarray | None = None  # mapped colours, (width, height) as pygame
         self._surface: pygame.Surface | None = None
         self._scaled: pygame.Surface | None = None
-        self._key: tuple | None = None
-        self._corners: np.ndarray | None = None
+        self._palette_key: bytes | None = None
+        self._mapped: np.ndarray | None = None  # the palette as `_surface` pixel values
         self._previous_state: np.ndarray | None = None
 
     def reset(self) -> None:
         """Repaint every cell on the next draw."""
         self._previous_state = None
+
+    def _build(self, layout: GridLayout) -> None:
+        """Rasterise `layout` and paint its background and outline offscreen."""
+        samples = samples_per_pixel(layout.cell_size)
+        cells = rasterise(replace(layout, left=0, top=0), samples)
+        surface = pygame.Surface(cells.shape)
+        pixels = np.full(cells.shape, surface.map_rgb(self.background), dtype=np.uint32)
+        fill = cells
+        if samples == 1 and layout.cell_size >= MIN_OUTLINE_SIZE:
+            outline = _outline(cells)
+            pixels[outline] = surface.map_rgb(GRID_LINE_COLOR)
+            fill = np.where(outline, -1, cells)
+
+        flat = fill.ravel()
+        samples_in_cells = np.flatnonzero(flat >= 0)
+        cell_of_sample = flat[samples_in_cells]
+        order = samples_in_cells[np.argsort(cell_of_sample, kind="stable")]
+        self._order = order.astype(np.int32) if flat.size < 2**31 else order
+        counts = np.bincount(cell_of_sample, minlength=layout.width * layout.height)
+        self._starts = np.concatenate(([0], np.cumsum(counts)))
+
+        self._geometry = (layout.shape, layout.width, layout.height, layout.cell_size)
+        self._samples = samples
+        self._pixels = pixels
+        self._surface = surface
+        self._scaled = None
+        self._palette_key = None  # the colours are mapped for this surface
+        self._previous_state = None
+
+    def _paint(self, cells: np.ndarray, colors: np.ndarray) -> None:
+        """Give every sample of each of `cells` its colour (`colors`, one per cell)."""
+        assert self._order is not None and self._starts is not None and self._pixels is not None
+        starts = self._starts[cells]
+        counts = self._starts[cells + 1] - starts
+        # Each cell's run of `_order`: its start, then one entry per sample.
+        runs = np.repeat(starts - (np.cumsum(counts) - counts), counts)
+        runs += np.arange(runs.size)
+        self._pixels.reshape(-1)[self._order[runs]] = np.repeat(colors, counts)
 
     def draw(
         self,
@@ -347,38 +477,31 @@ class GeometricRenderer:
         palette: np.ndarray,
         layout: GridLayout,
     ) -> None:
-        draw_size = max(layout.cell_size, MIN_POLYGON_SIZE)
-        offscreen = replace(layout, cell_size=draw_size, left=0, top=0)
-        key = (grid.shape, grid.width, grid.height, draw_size, palette.tobytes())
-        if key != self._key or self._surface is None:
-            width, height = offscreen.pixel_size
-            self._surface = pygame.Surface((width + 1, height + 1))
-            self._corners = _all_corners(offscreen)
-            self._scaled = None
-            self._key = key
+        if (layout.shape, layout.width, layout.height, layout.cell_size) != self._geometry:
+            self._build(layout)
+        assert self._surface is not None and self._pixels is not None
+        palette_key = palette.tobytes()
+        if palette_key != self._palette_key:
+            self._palette_key = palette_key
+            self._mapped = np.array(
+                [self._surface.map_rgb(tuple(int(v) for v in rgb)) for rgb in palette],
+                dtype=np.uint32,
+            )
             self._previous_state = None
 
         state = occupancy_state(grid, palette)
         if self._previous_state is None or self._previous_state.shape != state.shape:
-            self._surface.fill(self.background)
             dirty = np.arange(state.size)
         else:
             dirty = np.flatnonzero(state != self._previous_state)
         self._previous_state = state
 
-        colors = [tuple(int(v) for v in rgb) for rgb in palette]
-        outline = draw_size >= MIN_OUTLINE_SIZE
-        assert self._corners is not None
-        for idx in dirty.tolist():
-            corners = self._corners[idx].tolist()
-            pygame.draw.polygon(self._surface, colors[state[idx]], corners)
-            if outline:
-                pygame.draw.polygon(self._surface, GRID_LINE_COLOR, corners, 1)
-
-        image = self._surface
-        if draw_size != layout.cell_size:
-            target_size = layout.pixel_size
-            if self._scaled is None or dirty.size or self._scaled.get_size() != target_size:
-                self._scaled = pygame.transform.smoothscale(self._surface, target_size)
-            image = self._scaled
+        if dirty.size:
+            assert self._mapped is not None
+            self._paint(dirty, self._mapped[state[dirty]])
+            pygame.surfarray.blit_array(self._surface, self._pixels)
+            if self._samples > 1:
+                self._scaled = pygame.transform.smoothscale(self._surface, layout.pixel_size)
+        image = self._scaled if self._samples > 1 else self._surface
+        assert image is not None
         surface.blit(image, (layout.left, layout.top))

@@ -46,6 +46,31 @@ def test_a_click_toggles_exactly_the_cell_drawn_under_it(make_app, ui, shape):
 
 
 @pytest.mark.parametrize("shape", ["hexagon", "triangle"])
+def test_a_click_on_any_pixel_of_a_cell_s_colour_edits_that_cell(make_app, ui, shape):
+    """pygame drew the polygons up to a pixel up-left of the geometry clicks were mapped with:
+    of a lone live cell's red pixels, 4-5 picked its left neighbour, so a click on the red
+    cell's edge placed a second cell instead of clearing it."""
+    app = _paused_empty(make_app, ui, grid={"shape": shape, "width": 50, "height": 50})
+    u = ui(app)
+    target = 25 * 50 + 25
+    app.session.set_cell(target, 1)
+    u.frame()
+
+    grid_rect = app.layout.grid_rect()
+    pixels = pygame.surfarray.array3d(app.screen.subsurface(grid_rect))
+    xs, ys = np.nonzero(np.all(pixels == render.ALIVE_COLORS[0], axis=-1))
+    red = [(grid_rect.x + int(x), grid_rect.y + int(y)) for x, y in zip(xs, ys, strict=True)]
+    assert len(red) > 30
+    layout = app._grid_layout()
+    assert {layout.cell_at(x, y) for x, y in red} == {target}
+
+    # A click on its red pixel farthest from the centre, on its edge, clears exactly it.
+    cx, cy = layout.cell_center(25, 25)
+    u.click(max(red, key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2))
+    assert not app.session.grid.occupancy.any()
+
+
+@pytest.mark.parametrize("shape", ["hexagon", "triangle"])
 def test_a_paused_grid_stays_drawn(make_app, ui, shape):
     """F25: from the second paused frame on, a hex/triangle grid was pure background."""
     app = make_app(grid={"shape": shape})
