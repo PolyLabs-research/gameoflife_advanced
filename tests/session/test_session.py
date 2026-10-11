@@ -1,3 +1,4 @@
+import tracemalloc
 from dataclasses import replace
 from pathlib import Path
 
@@ -59,6 +60,7 @@ def test_growth_rate_nonzero_across_conway_run():
         growth_rates.append(session.history_records[-1].lifeform_metrics[1].growth_rate)
 
     assert any(rate != 0.0 for rate in growth_rates)
+    assert growth_rates[0] == pytest.approx(0.2)  # F6: 5 -> 6 cells, not 6 measured against 0
 
 
 def test_entropy_positive_for_two_species_run():
@@ -121,6 +123,7 @@ def test_reset_clears_history_and_state():
 
     assert session.generation == 0
     assert len(session.history_records) == 0
+    assert list(session.history_alive) == [int(np.count_nonzero(session.grid.occupancy))]
     assert session.paused is False
     assert session.alert is None
 
@@ -263,3 +266,195 @@ def test_sudden_death_detection_resumes_once_a_full_window_follows_an_edit():
     assert session.alert is not None
     assert session.alert.kind is AlertKind.SUDDEN_DEATH
     assert session.paused is True
+
+
+# --- growth baselines (F6) ---------------------------------------------------------------------
+
+
+def _alive_by_species(session: SimulationSession) -> dict[int, int]:
+    occupancy = session.grid.occupancy
+    return {lf.id: int(np.count_nonzero(occupancy == lf.id)) for lf in session.lifeforms}
+
+
+def _assert_growth_measured_from(session: SimulationSession, before: dict[int, int]) -> None:
+    session.step()
+    for lifeform_id, metrics in session.history_records[-1].lifeform_metrics.items():
+        expected = (metrics.alive - before[lifeform_id]) / max(before[lifeform_id], 1)
+        assert metrics.growth_rate == pytest.approx(expected)
+
+
+def test_generation_one_growth_is_measured_against_the_seeded_grid():
+    """F6: generation 1 used to be measured against 0 (666.0 recorded instead of -0.467)."""
+    lifeforms = [Lifeform(i, CONWAY) for i in (1, 2, 3)]
+    session = SimulationSession(_config(n_lifeforms=3), lifeforms, seed=1234)
+    _assert_growth_measured_from(session, _alive_by_species(session))
+    for metrics in session.history_records[-1].lifeform_metrics.values():
+        assert -1.0 <= metrics.growth_rate <= 1.0
+
+    session.run(5)
+    session.reset()
+    _assert_growth_measured_from(session, _alive_by_species(session))
+
+
+def test_hand_placed_still_life_has_zero_growth_from_generation_one():
+    config = _config(width=10, height=10, wrap=True, initial_alive_percentage=0.0, n_lifeforms=1)
+    session = SimulationSession(config, [Lifeform(1, CONWAY)])
+    for r, c in [(4, 4), (4, 5), (5, 4), (5, 5)]:
+        session.grid.occupancy[r * 10 + c] = 1
+
+    session.run(3)
+
+    rates = [record.lifeform_metrics[1].growth_rate for record in session.history_records]
+    assert rates == [0.0, 0.0, 0.0]
+
+
+# --- generation 0 in the alive history (F7) ------------------------------------------------------
+
+
+def test_history_alive_starts_with_the_seeded_population():
+    session = SimulationSession(_config(), [Lifeform(1, CONWAY)], seed=5)
+    assert list(session.history_alive) == [int(np.count_nonzero(session.grid.occupancy))]
+    assert session.history_alive[0] > 0
+
+    session.run(4)
+    assert len(session.history_alive) == len(session.history_records) + 1
+
+
+def test_extinction_in_the_first_generation_raises_sudden_death():
+    """F7: with no generation-0 entry every baseline after a first-generation extinction was 0,
+    so the alert never fired and the session never paused."""
+    config = _config(width=10, height=10, wrap=True, initial_alive_percentage=0.5, n_lifeforms=1)
+    session = SimulationSession(config, [Lifeform(1, Rule(birth=set(), survive=set()))], seed=1)
+    window = config.alerts.sudden_death_window
+
+    session.run(window + 5)
+
+    assert session.paused is True
+    assert session.generation == window  # measured against generation 0, a full window back
+    assert session.alert.kind is AlertKind.SUDDEN_DEATH
+    assert session.alert.message == f"Sudden death: gen {window} drop 50->0"
+
+
+# --- pausing on a raised alert, not a persisting one (F8) ---------------------------------------
+
+
+def test_resuming_after_a_sudden_death_pause_keeps_running():
+    """F8: the crash stays in the comparison window for window-1 more generations; each of them
+    used to pause again, so every resume advanced exactly one generation."""
+    session = _collapsing_session()
+    session.step()
+    assert session.paused is True
+    assert session.paused_by_alert is True
+
+    session.paused = False
+    for _ in range(session.config.alerts.sudden_death_window + 5):
+        session.step()
+        assert session.paused is False
+    assert session.history_records[1].alert.kind is AlertKind.SUDDEN_DEATH  # still reported
+    assert session.alert is None  # and cleared once the crash left the window
+
+
+def test_a_later_crash_after_the_alert_cleared_pauses_again():
+    session = _collapsing_session()
+    session.step()
+    session.paused = False
+    window = session.config.alerts.sudden_death_window
+    session.run(window + 1)
+    assert session.alert is None
+    assert session.paused is False
+
+    for r, c in [(4, 4), (4, 5), (5, 4), (5, 5)]:  # a still life the dynamics "grew"
+        session.grid.occupancy[r * 10 + c] = 1
+    session.run(window)
+    assert session.paused is False
+    session.grid.occupancy[:] = 0  # and a second collapse
+    session.step()
+
+    assert session.alert.kind is AlertKind.SUDDEN_DEATH
+    assert session.paused is True
+
+
+# --- pause ownership across reset and new sessions (F48) ----------------------------------------
+
+
+def test_reset_keeps_a_pause_the_user_chose():
+    """F48: reset used to unpause, so the generation-0 grid could never be inspected."""
+    session = SimulationSession(_config(), [Lifeform(1, CONWAY)], seed=2)
+    session.run(5)
+    session.paused = True
+
+    session.reset()
+
+    assert session.paused is True
+    assert session.generation == 0
+    assert session.run(3) == 0  # still paused: nothing advances by itself
+    session.step()  # single-stepping from generation 0 still works
+    assert session.generation == 1
+
+
+def test_reset_lifts_a_pause_the_alert_imposed():
+    session = _collapsing_session()
+    session.step()
+    assert session.paused_by_alert is True
+
+    session.reset()
+
+    assert session.paused is False
+    assert session.paused_by_alert is False
+    assert session.alert is None
+
+
+def test_setting_paused_makes_the_pause_the_users():
+    session = _collapsing_session()
+    session.step()
+    session.paused = True  # e.g. the user pressed Pause again over the alert
+
+    assert session.paused_by_alert is False
+    session.reset()
+    assert session.paused is True
+
+
+def test_a_crash_stepped_into_while_paused_leaves_the_pause_the_users():
+    session = _collapsing_session()
+    session.paused = True
+    session.step()  # the app's single step (S)
+
+    assert session.alert.kind is AlertKind.SUDDEN_DEATH
+    assert session.paused is True
+    assert session.paused_by_alert is False
+
+
+def test_a_session_can_start_paused():
+    config = _config(width=10, height=10, wrap=True)
+    session = SimulationSession(config, [Lifeform(1, CONWAY)], paused=True)
+    assert session.paused is True
+    assert session.paused_by_alert is False
+    assert SimulationSession.from_config(config, paused=True).paused is True
+    assert SimulationSession.from_config(config).paused is False
+
+
+# --- run() keeps nothing per generation (F69) ----------------------------------------------------
+
+
+def test_run_returns_the_number_of_generations_stepped():
+    config = _config(width=10, height=10, wrap=True)
+    assert SimulationSession(config, [Lifeform(1, CONWAY)]).run(7) == 7
+    assert _collapsing_session().run(50) == 1  # auto-paused at generation 1
+    assert SimulationSession(config, [Lifeform(1, CONWAY)], paused=True).run(5) == 0
+
+
+def test_run_memory_does_not_grow_with_the_number_of_generations():
+    """F69: run(n) used to keep all n UpdateResults (~1 KB each) until it returned."""
+    config = _config(width=10, height=10, wrap=True, n_lifeforms=3, history_limit=10)
+    lifeforms = [Lifeform(i, CONWAY) for i in (1, 2, 3)]
+    session = SimulationSession(config, lifeforms, seed=1, auto_pause=False)
+    session.run(50)  # fill the bounded histories first
+
+    tracemalloc.start()
+    try:
+        session.run(3000)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 512 * 1024
