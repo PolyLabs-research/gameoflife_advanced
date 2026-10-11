@@ -35,6 +35,20 @@ Rules are written `B3/S23`. Once a neighbour count reaches 10 (12-neighbour tria
 are comma-separated: `B2,5,8,10/S0,8,12`. A single count of 10 or more keeps a trailing comma
 (`B12,/S2,3`) so it cannot be read as two digits.
 
+## Recording and discovery
+
+`autorun` records every generation of every session (a sudden-death alert does not end a
+session early). Ctrl+C or SIGTERM stops it with everything recorded so far written and exit
+status 130. It will not write into a `--db` file that is not a LatticeLife schema v2 database.
+
+`discover` keeps one checkpoint per search configuration (shape, triangle mode, `grid_size`,
+`steps`, `freeze_window` and the `[criticality]` settings) under `discovery.checkpoint_path`, so
+changing any of them starts a separate lineage instead of resuming another one. A second
+`discover` on a configuration that is already running refuses to start. Each rule is added to
+`discovery.discovered_path` once per lineage, when its running mean first reaches
+`save_threshold`. `discovery.steps` must leave room to detect a freeze:
+`int(0.4 * steps) + freeze_window <= steps`.
+
 ## Development
 
 ```bash
