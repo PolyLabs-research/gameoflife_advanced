@@ -18,6 +18,8 @@ uv run python -m latticelife.cli discover --minutes 30                 # (mu+lam
 
 3D torus rendering (the `V` key in `ui`) needs the optional extra: `uv sync --extra torus`.
 
+Requires Python 3.12 or 3.13: the locked pygame and moderngl releases ship wheels for those only.
+
 ## Configuration
 
 Every tunable lives in `config/default.toml` (pass `--config PATH` for another file). Each key is

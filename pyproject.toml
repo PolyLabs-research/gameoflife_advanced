@@ -3,7 +3,10 @@ name = "latticelife"
 version = "0.1.0"
 description = "LatticeLife — a lattice cellular automaton research platform. Geometry is data; one update rule."
 readme = "README.md"
-requires-python = ">=3.12"
+# Upper bound: the locked pygame 2.6.1 and moderngl 5.12.0 ship wheels for CPython 3.12/3.13 only;
+# on 3.14 they would build from source (needs SDL2 headers and a C toolchain). Lift it once
+# wheels exist.
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "numpy>=1.26",
     "pygame>=2.5",
@@ -31,6 +34,20 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latticelife"]
+
+# The sdist otherwise takes every file the project .gitignore does not exclude, which picked up
+# local-only files ignored elsewhere (global git excludes, nested .gitignore files).
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.claude",
+    "/.hypothesis",
+    "/.pytest_cache",
+    "/.ruff_cache",
+    "/.venv",
+    "/out",
+    "/dist",
+    "/*.png",
+]
 
 [tool.ruff]
 line-length = 100
