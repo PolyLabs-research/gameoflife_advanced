@@ -23,6 +23,7 @@ from typing import Any
 
 from latticelife.core.geometries import SHAPES, TRIANGLE_MODES, validate_dimensions
 from latticelife.experiments.criticality import (
+    BURN_IN_FRAC,
     Band,
     CriticalityConfig,
     CriticalityWeights,
@@ -104,6 +105,8 @@ class DiscoveryConfig:
     checkpoint_path: str
     # Optional in TOML (default `out/discovered_rules.jsonl` under the project root).
     discovered_path: str = str(PROJECT_ROOT / "out" / "discovered_rules.jsonl")
+    # Optional in TOML: quiet steps after burn-in that count as a freeze (legacy: 100).
+    freeze_window: int = 100
 
 
 @dataclass(frozen=True)
@@ -345,6 +348,19 @@ def validate_config(config: Config) -> None:
     _check_range(disc.n_offspring, "discovery.n_offspring", 1)
     _check_range(disc.evals_per_candidate, "discovery.evals_per_candidate", 1)
     _check_range(disc.steps, "discovery.steps", 2)
+    _check_range(disc.freeze_window, "discovery.freeze_window", 1)
+    # Freeze detection counts quiet steps only after burn-in; if the run ends first, a rule
+    # that freezes at once is never penalised for it.
+    if int(disc.steps * BURN_IN_FRAC) + disc.freeze_window > disc.steps:
+        min_steps = disc.steps
+        while int(min_steps * BURN_IN_FRAC) + disc.freeze_window > min_steps:
+            min_steps += 1
+        raise ConfigError(
+            f"discovery.steps ({disc.steps}) is too short to detect a freeze: it needs "
+            f"burn-in ({BURN_IN_FRAC:g} x steps) + discovery.freeze_window "
+            f"({disc.freeze_window}) <= steps. Use steps >= {min_steps} or a smaller "
+            "freeze_window"
+        )
     _check_range(disc.p_birth, "discovery.p_birth", 0, 1)
     _check_range(disc.p_survive, "discovery.p_survive", 0, 1)
     _check_range(disc.mutation_rate, "discovery.mutation_rate", 0, 1)

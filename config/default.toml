@@ -34,7 +34,8 @@ mu = 5                      # elites carried forward
 n_offspring = 15            # the lambda in (mu+lambda)
 evals_per_candidate = 3
 grid_size = 64              # always wrapped; must suit every shape (even, >= 6)
-steps = 200
+steps = 200                 # needs int(0.4 * steps) + freeze_window <= steps
+freeze_window = 100         # quiet steps after burn-in that count as a freeze (optional)
 p_birth = 0.3
 p_survive = 0.3
 mutation_rate = 0.08        # per-bit flip probability, Rule.mutate semantics
