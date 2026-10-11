@@ -11,6 +11,7 @@ from latticelife.config import (
     PROJECT_ROOT,
     ConfigError,
     load_config,
+    log_dir_for,
     project_root_for,
     user_data_dir,
 )
@@ -189,6 +190,18 @@ def test_missing_file_and_bad_toml_raise_config_error(tmp_path):
     assert issubclass(ConfigError, ValueError)
 
 
+def test_unreadable_config_files_raise_config_error(tmp_path):
+    """A --config that is a directory or not UTF-8 raised IsADirectoryError /
+    UnicodeDecodeError, which the CLI reported as an unhandled exception with a traceback
+    instead of its one-line exit-2 error."""
+    with pytest.raises(ConfigError, match="cannot read config file"):
+        load_config(tmp_path)
+    latin1 = tmp_path / "latin1.toml"
+    latin1.write_bytes(b'note = "caf\xe9"\n')
+    with pytest.raises(ConfigError, match="invalid TOML: not UTF-8"):
+        load_config(latin1)
+
+
 # --- paths (F16) -------------------------------------------------------------------------------
 
 
@@ -260,6 +273,45 @@ def test_logging_table_and_discovered_path_are_optional(tmp_path):
     root = tmp_path.resolve()
     assert config.logging.dir == str(root / "out" / "logs")
     assert config.discovery.discovered_path == str(root / "out" / "discovered_rules.jsonl")
+
+
+def test_log_dir_for_matches_a_loaded_config(tmp_path):
+    assert log_dir_for(REPO_DEFAULT_CONFIG) == Path(load_config(REPO_DEFAULT_CONFIG).logging.dir)
+    data = _with(_default_data(), "logging.dir", "elsewhere/logs")
+    path = _write_config(tmp_path / "experiment", data)
+    assert log_dir_for(path) == Path(load_config(path).logging.dir)
+    assert log_dir_for(path) == (tmp_path / "experiment").resolve() / "elsewhere" / "logs"
+
+
+def test_log_dir_for_a_config_that_does_not_load(tmp_path):
+    """An invalid config's error is logged next to it (its own `logging.dir` when it names a
+    usable one, else `out/logs` under its project root), not in this checkout's out/logs."""
+    root = (tmp_path / "experiment").resolve()
+    invalid = _with(_default_data(), "discovery.mu", 0)
+    path = _write_config(tmp_path / "experiment", _with(invalid, "logging.dir", "mine"))
+    with pytest.raises(ConfigError):
+        load_config(path)
+    assert log_dir_for(path) == root / "mine"
+
+    path = _write_config(tmp_path / "experiment", _with(invalid, "logging.dir", ""))
+    assert log_dir_for(path) == root / "out" / "logs"
+    path = _write_config(tmp_path / "experiment", _with(invalid, "logging.dir", 3))
+    assert log_dir_for(path) == root / "out" / "logs"
+    broken = tmp_path / "experiment" / "broken.toml"
+    broken.write_text("[logging\ndir = ")
+    assert log_dir_for(broken) == root / "out" / "logs"
+    latin1 = tmp_path / "experiment" / "latin1.toml"
+    latin1.write_bytes(b'note = "caf\xe9"\n')
+    assert log_dir_for(latin1) == root / "out" / "logs"
+
+
+def test_log_dir_for_a_path_with_no_file_is_none(tmp_path, monkeypatch):
+    """No file, nothing to log next to: the caller keeps the default log directory rather than
+    putting out/logs in the current directory or creating a mistyped path's directories."""
+    monkeypatch.chdir(tmp_path)
+    assert log_dir_for("no.toml") is None
+    assert log_dir_for(tmp_path / "no" / "such" / "config.toml") is None
+    assert log_dir_for(tmp_path) is None
 
 
 def test_tmp_output_config_keeps_every_output_out_of_the_project(tmp_output_config, tmp_path):

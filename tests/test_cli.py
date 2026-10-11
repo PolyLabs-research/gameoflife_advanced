@@ -19,9 +19,10 @@ import pytest
 
 import latticelife
 from latticelife import cli
+from latticelife import logging as ll_logging
 from latticelife.config import DEFAULT_CONFIG_PATH
 from latticelife.discovery.worker import DiscoveryWorker, acquire_lineage_lock
-from latticelife.logging import LOG_DIR_ENV
+from latticelife.logging import LOG_DIR_ENV, configure_logging
 from latticelife.session.session import SimulationSession
 
 SRC_DIR = Path(latticelife.__file__).resolve().parents[1]
@@ -271,6 +272,74 @@ def test_invalid_config_exits_2_with_one_line(tmp_path, log_dir, capsys):
     assert err.startswith("latticelife discover: ") and "discovery.steps" in err
     assert "Traceback" not in err
     assert _events(log_dir, "app")[-1]["event"] == "invalid_input"
+
+
+@pytest.fixture
+def checkout_log_dir(tmp_path, monkeypatch):
+    """No LATTICELIFE_LOG_DIR, nothing configured yet, and a stand-in for this checkout's
+    out/logs (logging.DEFAULT_LOG_DIR), as in a fresh `latticelife` process."""
+    monkeypatch.delenv(LOG_DIR_ENV, raising=False)
+    path = tmp_path / "checkout" / "out" / "logs"
+    monkeypatch.setattr(ll_logging, "DEFAULT_LOG_DIR", path)
+    previous = ll_logging._configured_dir
+    configure_logging(None)
+    yield path
+    configure_logging(previous)
+
+
+@pytest.mark.parametrize("own_log_dir", [None, "my-logs"])
+def test_an_invalid_config_is_logged_next_to_it(tmp_path, checkout_log_dir, capsys, own_log_dir):
+    """An invalid --config from another directory logged its invalid_input event to this
+    checkout's out/logs (it was never loaded, so its logging.dir was never configured)."""
+    overrides = {"discovery__mu": 0}
+    if own_log_dir is not None:
+        overrides["logging__dir"] = own_log_dir
+    config = write_config(tmp_path / "scratch", **overrides)
+    assert cli.main(["discover", "--config", str(config)]) == cli.EXIT_USAGE
+    assert "discovery.mu" in capsys.readouterr().err
+
+    expected = (tmp_path / "scratch").resolve() / (own_log_dir or "out/logs")
+    events = _events(expected, "app")
+    assert [e["event"] for e in events] == ["invalid_input"]
+    assert "discovery.mu" in events[0]["error"]
+    assert not checkout_log_dir.exists()
+
+
+def _autorun_config_error(config, capsys):
+    argv = ["autorun", "--sessions", "1", "--generations", "1", "--config", str(config)]
+    assert cli.main(argv) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert err.startswith(f"latticelife autorun: {config}: ") and "Traceback" not in err
+    return err
+
+
+def test_a_config_that_is_not_utf8_exits_2_and_logs_next_to_it(tmp_path, checkout_log_dir, capsys):
+    """It escaped as an unhandled UnicodeDecodeError, with a traceback."""
+    config = tmp_path / "scratch" / "latin1.toml"
+    config.parent.mkdir()
+    config.write_bytes(b'note = "caf\xe9"\n')
+    assert "not UTF-8" in _autorun_config_error(config, capsys)
+    events = _events(config.parent.resolve() / "out" / "logs", "app")
+    assert [e["event"] for e in events] == ["invalid_input"]
+    assert not checkout_log_dir.exists()
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_a_config_path_with_no_file_logs_to_the_default_dir(
+    tmp_path, checkout_log_dir, capsys, monkeypatch, kind
+):
+    """No file to log next to (a directory escaped as an unhandled IsADirectoryError): the
+    event goes to the default log directory, never into the current directory (F16)."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    config = Path("no.toml")
+    if kind == "directory":
+        config = Path("config.d")
+        config.mkdir()
+    _autorun_config_error(config, capsys)
+    assert [e["event"] for e in _events(checkout_log_dir, "app")] == ["invalid_input"]
+    assert not (cwd / "out").exists()
 
 
 def test_missing_config_exits_2(tmp_path, log_dir, capsys):

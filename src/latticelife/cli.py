@@ -37,7 +37,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 
-from latticelife.config import DEFAULT_CONFIG_PATH, Config, ConfigError, load_config
+from latticelife.config import DEFAULT_CONFIG_PATH, Config, ConfigError, load_config, log_dir_for
 from latticelife.core.geometries import SHAPES, max_degree, validate_dimensions
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
@@ -144,8 +144,15 @@ def _randomise_session_params(
 
 
 def _load_config(path: Path) -> Config:
-    """Load the config and send this process's JSONL logs to its `logging.dir` (§6.10)."""
-    config = load_config(path)
+    """Load the config and send this process's JSONL logs to its `logging.dir` (§6.10). A config
+    file that fails to load still logs next to itself (`log_dir_for`), not in this copy's own
+    `out/logs`: a bad config from another project must not write into this checkout. Only a
+    path with no file behind it falls back to the default log directory."""
+    try:
+        config = load_config(path)
+    except ConfigError:
+        configure_logging(log_dir_for(path))
+        raise
     configure_logging(config.logging.dir)
     return config
 

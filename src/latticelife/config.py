@@ -206,6 +206,37 @@ def project_root_for(config_path: str | Path) -> Path:
     return config_dir
 
 
+def log_dir_for(config_path: str | Path) -> Path | None:
+    """The `logging.dir` a config file names, read as far as the file allows — for logging the
+    error when the file does not load (§6.10), so a bad `--config` from another project is
+    logged next to that config, not in this copy's `PROJECT_ROOT/out/logs`. That is the file's
+    `[logging] dir` when it is a non-empty string, else `out/logs`, resolved against
+    `project_root_for(config_path)` exactly as `load_config` would resolve it.
+
+    None when there is no such file (a missing path, or a directory): there is nothing to log
+    next to, and the caller keeps the default log directory — resolving a mistyped relative
+    path would otherwise put `out/logs` in the current directory, or create the directories
+    of a mistyped absolute one."""
+    path = Path(config_path)
+    if not os.path.isfile(path):  # unlike Path.is_file, never raises
+        return None
+    try:
+        root = project_root_for(path)
+    except OSError:  # an unsearchable directory above the file
+        return None
+    value = _OPTIONAL_DEFAULTS["logging"]["dir"]
+    try:
+        with path.open("rb") as f:
+            table = tomllib.load(f).get("logging")
+    except (OSError, ValueError):  # unreadable, not UTF-8, or not TOML
+        table = None
+    if isinstance(table, dict):
+        configured = table.get("dir")
+        if isinstance(configured, str) and configured.strip():
+            value = configured
+    return Path(_resolve_paths({"dir": value}, "logging", root)["dir"])
+
+
 # --- typed construction -----------------------------------------------------------------------
 
 
@@ -432,6 +463,10 @@ def load_config(path: str | Path) -> Config:
             data = tomllib.load(f)
     except FileNotFoundError:
         raise ConfigError(f"{path}: config file not found") from None
+    except OSError as exc:  # a directory, no read permission, an I/O error
+        raise ConfigError(f"{path}: cannot read config file: {exc.strerror or exc}") from None
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{path}: invalid TOML: not UTF-8 text ({exc.reason})") from None
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from None
 
