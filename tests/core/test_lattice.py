@@ -3,9 +3,10 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from latticelife.core.lattice import LatticeGrid, clone_grid
+from latticelife.core.lattice import LIFESPAN_MAX, LatticeGrid, clone_grid
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
+from latticelife.session.metrics import compute_lifeform_metrics
 
 CONWAY = Rule(birth={3}, survive={2, 3})
 
@@ -143,3 +144,169 @@ def test_clone_grid_shares_adjacency_and_copies_state():
 
     twin.occupancy[1] = 1  # mutating the twin must not affect the original
     assert grid.occupancy[1] == 0
+
+
+def test_lifespans_saturate_instead_of_wrapping_negative():
+    """F70: a cell surviving 2^31-1 generations used to wrap to -2^31, dropping out of the
+    static count and dragging avg_lifespan hugely negative."""
+    grid = LatticeGrid([Lifeform(1, CONWAY)], "square", 5, 5, wrap=True)
+    block = [6, 7, 11, 12]  # 2x2 still life
+    grid.occupancy[block] = 1
+    grid.lifespans[block] = LIFESPAN_MAX - 1
+
+    rng = np.random.default_rng(0)
+    for _ in range(3):
+        result = grid.step(rng)
+        metrics = compute_lifeform_metrics(1, result, grid, 4, 4)
+        assert np.all(grid.lifespans[block] == LIFESPAN_MAX)
+        assert result.static[1] == result.alive[1] == 4
+        assert metrics.avg_lifespan == float(LIFESPAN_MAX)
+
+    assert grid.lifespans.dtype == np.int32
+
+
+# --- multi-species semantics (§6.3 steps 2 and 4) ---------------------------------------------
+
+
+def _place(grid: LatticeGrid, cells: list[tuple[int, int]], lifeform_id: int) -> None:
+    for r, c in cells:
+        grid.occupancy[r * grid.width + c] = lifeform_id
+        grid.lifespans[r * grid.width + c] = 1
+
+
+@pytest.mark.parametrize("order", [(1, 2), (2, 1)])
+def test_contested_birth_tie_break_is_uniform(order):
+    """F62: a cell with exactly 3 neighbours of each of two Conway species is a birth for both;
+    the winner must be uniform, not biased towards the first-listed or lowest-id species."""
+    grid = LatticeGrid([Lifeform(i, CONWAY) for i in order], "square", 11, 11, wrap=True)
+    wins = {1: 0, 2: 0}
+    trials = 400
+    for seed in range(trials):
+        grid.occupancy[:] = 0
+        grid.lifespans[:] = 0
+        _place(grid, [(4, 4), (4, 5), (4, 6)], 1)
+        _place(grid, [(6, 4), (6, 5), (6, 6)], 2)
+        grid.step(np.random.default_rng(seed))
+        wins[int(grid.occupancy[5 * 11 + 5])] += 1
+
+    assert wins[1] + wins[2] == trials
+    assert 0.35 * trials < wins[1] < 0.65 * trials
+
+
+INERT = Rule(birth=set(), survive=set(range(13)))  # never born, never dies on any shape
+
+
+@pytest.mark.parametrize("order", [(1, 2), (2, 1)])
+@pytest.mark.parametrize(("shape", "triangle_mode", "degree"), SHAPES)
+def test_death_surrounded_by_a_foreign_species_is_credited_to_it(
+    shape, triangle_mode, degree, order
+):
+    """F12: a cell whose every neighbour is foreign has more neighbours than it survives among
+    (max(S) = 1) and dies; the surrounding species is credited. Legacy-style attribution, which
+    measured overcrowding by the victim's own count (0 here), credited nothing."""
+    rules = {1: Rule(birth=set(), survive={1}), 2: INERT}
+    lifeforms = [Lifeform(i, rules[i]) for i in order]
+    grid = LatticeGrid(lifeforms, shape, 12, 12, wrap=True, triangle_mode=triangle_mode)
+    victim = 5 * 12 + 6
+    grid.occupancy[grid.adjacency[victim]] = 2
+    grid.occupancy[victim] = 1
+    grid.lifespans[grid.occupancy > 0] = 1
+
+    result = grid.step(np.random.default_rng(0))
+
+    assert result.deaths[1] == 1 and result.deaths[2] == 0
+    assert result.kills[2] == 1
+    assert result.kills[1] == 0
+
+
+def _centre_victim(victim_rule: Rule, ring: list[int]) -> np.ndarray:
+    """A 9x9 wrapped square grid: species 1 (`victim_rule`) alone at the centre, its 8 Moore
+    neighbours set from `ring` (0 = empty, 2 and 3 = inert species). Returns kills after one
+    step; nothing but the centre can change, since no species has a birth condition."""
+    lifeforms = [Lifeform(1, victim_rule), Lifeform(2, INERT), Lifeform(3, INERT)]
+    grid = LatticeGrid(lifeforms, "square", 9, 9, wrap=True)
+    centre = 4 * 9 + 4
+    grid.occupancy[grid.adjacency[centre]] = ring
+    grid.occupancy[centre] = 1
+    grid.lifespans[grid.occupancy > 0] = 1
+
+    result = grid.step(np.random.default_rng(0))
+
+    assert grid.occupancy[centre] == 0 and result.deaths[1] == 1  # every case kills the centre
+    return result.kills
+
+
+def test_isolation_death_is_never_credited():
+    """F12: overcrowding means more live neighbours than the victim's species survives among.
+    A Conway cell with 3 foreign neighbours died of isolation (it would survive 3 of its own),
+    so nothing is credited even though one species has every neighbour."""
+    conway_no_birth = Rule(birth=set(), survive={2, 3})
+    assert _centre_victim(conway_no_birth, [2, 2, 2, 0, 0, 0, 0, 0]).tolist() == [0, 0, 0, 0]
+    assert _centre_victim(conway_no_birth, [2, 2, 2, 2, 0, 0, 0, 0]).tolist() == [0, 0, 1, 0]
+
+
+def test_empty_survive_set_deaths_are_never_credited():
+    """F12: with S = {} a cell dies whatever surrounds it; legacy attribution (max(S) = -1)
+    credited every such death to a foreign majority."""
+    no_survival = Rule(birth=set(), survive=set())
+    assert _centre_victim(no_survival, [2, 2, 2, 0, 0, 0, 0, 0]).tolist() == [0, 0, 0, 0]
+    assert _centre_victim(no_survival, [2] * 8).tolist() == [0, 0, 0, 0]
+
+
+def test_overcrowding_without_a_foreign_majority_is_not_credited():
+    victim = Rule(birth=set(), survive={1})
+    assert _centre_victim(victim, [2, 2, 2, 2, 3, 3, 3, 3]).tolist() == [0, 0, 0, 0]  # 4 of 8
+    assert _centre_victim(victim, [2, 2, 2, 3, 3, 0, 0, 0]).tolist() == [0, 0, 1, 0]  # 3 of 5
+
+
+def _reference_kills(grid: LatticeGrid, after: np.ndarray, size: int) -> np.ndarray:
+    """Per-cell transcription of §6.3 step 4 as implemented (see core/lattice.py)."""
+    rules = {lf.id: lf.rule for lf in grid.lifeforms}
+    kills = np.zeros(size, dtype=np.int64)
+    for cell, species in enumerate(grid.occupancy.tolist()):
+        if species == 0 or after[cell] != 0 or not rules[species].survive:
+            continue
+        neighbours = [grid.occupancy[j] for j in grid.adjacency[cell] if j >= 0]
+        per_species = {s: neighbours.count(s) for s in rules}
+        total = sum(per_species.values())
+        if total <= max(rules[species].survive):
+            continue
+        killer, count = max(
+            ((s, n) for s, n in per_species.items() if s != species), key=lambda item: item[1]
+        )
+        if 2 * count > total:
+            kills[killer] += 1
+    return kills
+
+
+@pytest.mark.parametrize(("shape", "triangle_mode", "_degree"), SHAPES)
+@pytest.mark.parametrize("wrap", [True, False])
+def test_kills_match_the_per_cell_reference_on_random_grids(shape, triangle_mode, _degree, wrap):
+    lifeforms = [
+        Lifeform(1, CONWAY),
+        Lifeform(2, Rule(birth={2}, survive={3, 4})),
+        Lifeform(3, Rule(birth={3, 6}, survive={1, 2, 5})),
+        Lifeform(4, Rule(birth={1}, survive=set())),
+        Lifeform(5, Rule(birth={2}, survive={0})),  # max(S) = 0: kills possible at degree 3
+    ]
+    grid = LatticeGrid(lifeforms, shape, 16, 12, wrap, triangle_mode)
+    rng = np.random.default_rng(11)
+    grid.occupancy[:] = rng.integers(0, 6, grid.n_cells)
+    grid.lifespans[grid.occupancy > 0] = 1
+    total_kills = 0
+    for _ in range(8):
+        before = clone_grid(grid)
+        result = grid.step(rng)
+        assert result.kills.tolist() == _reference_kills(before, grid.occupancy, 6).tolist()
+        total_kills += int(result.kills.sum())
+    assert total_kills > 0
+
+
+def test_common_rules_record_kills():
+    """F12: under legacy attribution three Conway species on a square grid could never record
+    a kill (it needed degree >= 2*max(S)+3 = 9)."""
+    grid = LatticeGrid([Lifeform(i, CONWAY) for i in (1, 2, 3)], "square", 48, 48, wrap=True)
+    rng = np.random.default_rng(3)
+    grid.occupancy[:] = rng.integers(0, 4, grid.n_cells)
+    kills = sum(int(grid.step(rng).kills.sum()) for _ in range(30))
+    assert kills > 0
