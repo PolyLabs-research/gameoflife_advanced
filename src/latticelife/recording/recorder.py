@@ -4,9 +4,10 @@ lock. Fixed DDL, no runtime ALTER-TABLE migration code: recording starts fresh o
 legacy DB's lifespan-derived columns (D-1) and zero-filled metric columns (D-2) are not migrated
 (see the salvage manifest).
 
-Opening a file never modifies one that is not already ours: a new or empty file gets the v2
-schema, `user_version = 2` and WAL; an existing schema v2 file is checked table by table; any
-other file (the legacy `species.db`, a later schema, not SQLite at all) raises
+Opening a file never modifies one that is not already ours: a new or empty file (`user_version`
+0 and no schema object of any kind) gets the v2 schema, `user_version = 2` and WAL; an existing
+schema v2 file is checked table by table; any other file (the legacy `species.db`, a later
+schema, one holding only views/indexes/triggers, not SQLite at all) raises
 `RecorderSchemaError` before a single PRAGMA or DDL statement is written to it.
 
 `lifeform_meta.birth`/`survive` hold `core.rules.format_counts` text: the spec's compact digits
@@ -155,26 +156,28 @@ class Recorder:
         that writes (WAL, DDL, user_version) happens only after the checks pass."""
         try:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            tables = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-                )
-            }
+            # Every schema object, not just tables: a file holding only views, indexes or
+            # triggers is somebody else's database, not an empty one.
+            objects = conn.execute("SELECT type, name FROM sqlite_master").fetchall()
         except sqlite3.DatabaseError as exc:
             raise RecorderSchemaError(
                 f"{self.db_path} is not a SQLite database ({exc}); refusing to use it"
             ) from None
+        tables = {
+            name for kind, name in objects if kind == "table" and not name.startswith("sqlite_")
+        }
 
-        if version == 0 and not tables:
+        if version == 0 and not objects:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(f"BEGIN; {_SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
             return
 
         if version != SCHEMA_VERSION:
+            others = sorted(f"{kind} {name}" for kind, name in objects if kind != "table")
             raise RecorderSchemaError(
                 f"{self.db_path} is not a LatticeLife schema v{SCHEMA_VERSION} database "
-                f"(user_version={version}, tables: {', '.join(sorted(tables)) or 'none'}); "
+                f"(user_version={version}, tables: {', '.join(sorted(tables)) or 'none'}"
+                f"{'; other objects: ' + ', '.join(others) if others else ''}); "
                 "refusing to modify it. Record into a new file instead (autorun --db)."
             )
         for table, expected in _schema_columns().items():

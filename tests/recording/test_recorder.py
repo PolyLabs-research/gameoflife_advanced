@@ -258,6 +258,45 @@ def test_v2_db_with_wrong_columns_is_refused(tmp_path):
     assert _db_state(db_path)[1] == ["life_records"]
 
 
+@pytest.mark.parametrize(
+    "ddl",
+    [
+        "CREATE VIEW v AS SELECT 1 AS x;",
+        "CREATE VIEW v AS SELECT 1 AS x;"
+        "CREATE TRIGGER t INSTEAD OF INSERT ON v BEGIN SELECT 1; END;",
+    ],
+    ids=["view", "view-and-trigger"],
+)
+def test_db_without_tables_but_with_other_objects_is_refused_untouched(tmp_path, ddl):
+    """A user_version-0 file with no tables used to count as empty: one holding only views (and
+    triggers on them) was switched to WAL, given the v2 tables and relabelled user_version=2."""
+    db_path = tmp_path / "views.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(ddl)
+    conn.close()
+    before_bytes = db_path.read_bytes()
+
+    with pytest.raises(RecorderSchemaError, match=r"user_version=0.*view v"), Recorder(db_path):
+        pass
+
+    assert db_path.read_bytes() == before_bytes
+    assert _db_state(db_path)[0:2] == (0, [])
+    assert _journal_mode(db_path) == "delete"
+    assert not Path(f"{db_path}-wal").exists()
+
+
+def test_existing_empty_file_gets_the_schema(tmp_path):
+    db_path = tmp_path / "touched.db"
+    db_path.touch()
+    with Recorder(db_path):
+        pass
+    version, tables, _ = _db_state(db_path)
+    assert version == 2
+    assert {"session_metadata", "lifeform_meta", "generation_metrics", "life_records"} <= set(
+        tables
+    )
+
+
 def test_non_sqlite_file_is_refused_untouched(tmp_path):
     db_path = tmp_path / "notes.txt"
     db_path.write_text("not a database\n" * 100)
