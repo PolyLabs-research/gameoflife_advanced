@@ -1,14 +1,17 @@
-"""SettingsPanel rule notation and Apply validation (F1, F2, F43), driven headless under the SDL
+"""SettingsPanel rule notation and Apply validation (F1, F2, F43), and its event dispatch,
+collapsing and scrolling (F0, F41, F42, F44, F45, F49, F55, F60), driven headless under the SDL
 dummy driver."""
 
 from dataclasses import replace
 
+import numpy as np
 import pygame
 import pytest
 
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
 from latticelife.ui import panel as panel_module
+from latticelife.ui import widgets
 from latticelife.ui.panel import SettingsPanel
 
 CONWAY = Rule(birth={3}, survive={2, 3})
@@ -209,3 +212,330 @@ def test_set_lifeforms_rewrites_the_species_rows(config, font):
     ]
     assert len(panel.randomize_buttons) == 3
     assert panel.error is None
+
+
+# --- event dispatch, collapsing and scrolling, driven through the real App ------------------
+
+
+def _open_shape_list(app, u):
+    u.click(app.settings_panel.shape_dropdown.rect.center)
+    u.frame()  # the open list is laid out when drawn
+    return dict(app.settings_panel.shape_dropdown._option_rects)
+
+
+def test_an_open_shape_list_takes_the_click_for_itself(make_app, ui):
+    """F0: choosing 'triangle' also toggled the Wrap button under it, and 'hexagon' focused
+    Height."""
+    app = make_app()
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+
+    options = _open_shape_list(app, u)
+    assert options["triangle"].colliderect(panel.wrap_button.rect)
+    u.click(options["triangle"].center)
+    assert panel.shape_dropdown.selected == "triangle"
+    assert panel.config.grid.wrap is True
+
+    options = _open_shape_list(app, u)
+    assert options["hexagon"].colliderect(panel.height_input.rect)
+    u.click(options["hexagon"].center)
+    assert panel.shape_dropdown.selected == "hexagon"
+    assert not panel.height_input.active
+
+    _open_shape_list(app, u)
+    session = app.session
+    u.click(app.new_button.rect.center)  # outside the list: only closes it
+    assert not panel.shape_dropdown.active and app.session is session
+
+
+def test_shrinking_the_count_then_clicking_a_removed_row_does_nothing(make_app, ui):
+    """F41: committing a smaller count by clicking a now-removed R button raised IndexError."""
+    app = make_app()
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    u.click(panel.species_count_input.rect.center)
+    u.clear_field()
+    u.type("3")
+    u.key(pygame.K_RETURN, "\r")
+    assert len(panel.rule_inputs) == 3
+    removed_r = panel.randomize_buttons[2].rect.center
+    first_rule = (panel.rule_inputs[0][0].text, panel.rule_inputs[0][1].text)
+
+    u.click(panel.species_count_input.rect.center)
+    u.clear_field()
+    u.type("1")
+    u.click(removed_r)  # the blur commits 1 first; the R it was aimed at is gone
+
+    assert len(panel.rule_inputs) == len(panel.randomize_buttons) == 1
+    assert (panel.rule_inputs[0][0].text, panel.rule_inputs[0][1].text) == first_rule
+    panel._randomize_rule(2)  # a stale index is ignored, not an IndexError
+
+
+def test_collapsed_sections_get_no_clicks(make_app, ui):
+    """F42: widgets in a collapsed section kept their rects and took clicks meant for the
+    controls that moved up into their place."""
+    app = make_app()
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    old_shape = panel.shape_dropdown.rect.copy()
+
+    u.click(panel.grid_section.header_rect.center)  # collapse Grid
+    assert panel.wrap_button.rect.size == (0, 0) and panel.height_input.rect is None
+    u.click(old_shape.center)  # now the Speed header: no ghost Shape list
+    assert not panel.shape_dropdown.active
+    u.click(panel.speed_section.header_rect.center)  # re-expand Speed
+    u.click(panel.species_section.header_rect.center)
+    assert panel.config.grid.wrap is True  # hidden Wrap untouched
+    u.click(panel.fps_slider.rect.center)
+    assert not panel.height_input.active and not panel.width_input.active
+
+    u.click(panel.grid_section.header_rect.center)  # expand Grid again
+    u.click(panel.species_section.header_rect.center)  # expand Species again
+    fps = panel.fps_slider.value
+    u.click(panel.speed_section.header_rect.center)  # collapse Speed
+    assert panel.fps_slider.rect is None
+    header = panel.species_section.header_rect
+    u.click((header.right - 14, header.centery))
+    assert panel.fps_slider.value == fps
+
+
+def test_collapsing_a_section_commits_and_blurs_its_focused_field(make_app, ui):
+    app = make_app()
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    u.click(panel.height_input.rect.center)
+    u.clear_field()
+    u.type("40")
+    u.click(panel.grid_section.header_rect.center)
+    assert not panel.height_input.active and panel.height_input.value == 40
+    u.key(pygame.K_SPACE, " ")  # shortcuts work again
+    assert app.session.paused
+
+
+def test_ten_species_scroll_and_apply_stays_reachable(make_app, ui):
+    """F44: with 7+ species the panel ran off the window and Apply could not be clicked."""
+    app = make_app(simulation={"n_lifeforms": 10})
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    window = app.screen.get_rect()
+    assert window.contains(panel.apply_button.rect)
+    assert panel.max_scroll > 0
+    last_r = panel.randomize_buttons[9]
+    assert not panel._content_clip.contains(last_r.rect)
+
+    u.wheel(-1, over=(150, 400))
+    assert panel.scroll_y > 0
+    u.wheel(-20)
+    assert panel.scroll_y == panel.max_scroll  # clamped at the bottom
+    assert panel._content_clip.contains(last_r.rect)
+    before = panel.rule_inputs[9][0].text, panel.rule_inputs[9][1].text
+    for _ in range(5):
+        u.click(last_r.rect.center)
+        if (panel.rule_inputs[9][0].text, panel.rule_inputs[9][1].text) != before:
+            break
+    assert (panel.rule_inputs[9][0].text, panel.rule_inputs[9][1].text) != before
+
+    # The Grid header is now scrolled up behind the stat cards: a click there is not its.
+    hidden = panel.grid_section.header_rect
+    assert hidden.bottom <= panel._content_clip.top
+    u.click(hidden.center)
+    assert panel.grid_section.expanded
+
+    u.click(panel.apply_button.rect.center)
+    assert len(app.session.lifeforms) == 10
+    u.wheel(30, over=(150, 400))
+    assert panel.scroll_y == 0  # clamped at the top
+
+
+def test_the_wheel_outside_the_panel_does_not_scroll_it(make_app, ui):
+    app = make_app(simulation={"n_lifeforms": 10})
+    u = ui(app)
+    u.frame()
+    u.wheel(-3, over=app.layout.grid_rect().center)
+    assert app.settings_panel.scroll_y == 0
+
+
+def test_apply_reads_width_height_shape_and_rules_into_the_right_fields(config, font):
+    """F60: a swapped width/height or birth/survive in Apply went unnoticed by every test."""
+    for shape in ("square", "hexagon", "triangle"):
+        panel, applied = _make_panel(config, [Lifeform(1, CONWAY), Lifeform(2, CONWAY)], font)
+        panel.shape_dropdown.selected = shape
+        panel.width_input.text, panel.height_input.text = "30", "20"
+        panel.rule_inputs[1][0].text, panel.rule_inputs[1][1].text = "1", "4,5"
+        _click_apply(panel)
+        new_config, lifeforms = applied[-1]
+        assert (new_config.grid.shape, new_config.grid.width, new_config.grid.height) == (
+            shape,
+            30,
+            20,
+        )
+        assert new_config.simulation.n_lifeforms == 2
+        assert lifeforms[1] == Lifeform(2, Rule(birth={1}, survive={4, 5}))
+
+
+def test_wrap_is_staged_until_apply(config, font):
+    panel, applied = _make_panel(config, [Lifeform(1, CONWAY)], font)
+    panel._toggle_wrap()
+    assert applied == []
+    assert panel.wrap_button.text == "Wrap: Off"
+    _click_apply(panel)
+    assert applied[0][0].grid.wrap is False
+
+
+def test_raising_the_count_adds_rows_with_placeholders(config, font):
+    panel, _ = _make_panel(config, [Lifeform(1, CONWAY)], font)
+    panel.species_count_input.text = "4"
+    panel.species_count_input.commit()
+    assert len(panel.rule_inputs) == len(panel.randomize_buttons) == 4
+    assert [(b.placeholder, s.placeholder) for b, s in panel.rule_inputs] == [
+        ("birth", "survive")
+    ] * 4
+
+
+def test_more_than_ten_lifeforms_are_shown_and_applied_as_ten(config, font):
+    """F49: the count showed 12 while Apply silently cut the rows to 10."""
+    lifeforms = [Lifeform(i, CONWAY) for i in range(1, 13)]
+    panel, applied = _make_panel(config, lifeforms, font)
+    assert panel.species_count_input.text == "10"
+    assert len(panel.rule_inputs) == 10
+    _click_apply(panel)
+    assert len(applied[0][1]) == 10
+
+
+def test_the_r_button_is_reproducible_from_the_seed(config, font):
+    """F55: R sampled from a fresh unseeded generator on every press."""
+    seeded = replace(config, simulation=replace(config.simulation, seed=42))
+    texts = []
+    for _ in range(2):
+        panel, _ = _make_panel(seeded, [Lifeform(1, CONWAY)], font)
+        sequence = []
+        for _ in range(4):
+            panel._randomize_rule(0)
+            sequence.append((panel.rule_inputs[0][0].text, panel.rule_inputs[0][1].text))
+        texts.append(sequence)
+    assert texts[0] == texts[1]
+    assert len(set(texts[0])) > 1
+
+
+def test_fps_slider_reports_live_and_shows_its_value(config, font):
+    """F45: the slider had no callback and never showed a value."""
+    seen = []
+    panel = SettingsPanel(
+        config, [Lifeform(1, CONWAY)], font, lambda c, lfs: None, on_fps_change=seen.append
+    )
+    surface = pygame.Surface((400, 900))
+    panel.draw(surface, 16, 16, 300)
+    slider = panel.fps_slider
+    value_area = pygame.Rect(slider.rect.right, slider.rect.y, 316 - slider.rect.right, 28)
+    before = pygame.surfarray.array3d(surface.subsurface(value_area)).copy()
+
+    end = (slider.rect.right - 1, slider.rect.centery)  # the last pixel reads 60, not 59
+    panel.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=end, button=1))
+    panel.handle_event(pygame.event.Event(pygame.MOUSEBUTTONUP, pos=end, button=1))
+    surface.fill((0, 0, 0))
+    panel.draw(surface, 16, 16, 300)
+
+    assert seen == [60] and panel.config.ui.fps == 60
+    assert not np.array_equal(before, pygame.surfarray.array3d(surface.subsurface(value_area)))
+
+
+def test_a_click_that_blurs_a_field_still_reaches_apply_and_the_action_buttons(make_app, ui):
+    """Commit 0b5d48d: a focused field that commits on blur must not swallow the click meant
+    for another control — the typed value is committed first, then that control acts."""
+    app = make_app()
+    u = ui(app)
+    u.frame(3)
+    panel = app.settings_panel
+
+    u.click(panel.width_input.rect.center)
+    u.clear_field()
+    u.type("30")
+    u.click(panel.apply_button.rect.center)  # no Enter first
+    assert not panel.width_input.active
+    assert app.session.grid.width == 30
+
+    u.frame(3)
+    u.click(panel.rule_inputs[0][1].rect.center)
+    u.click(app.reset_button.rect.center)
+    assert not panel.rule_inputs[0][1].active
+    assert app.session.generation == 0
+
+
+@pytest.mark.parametrize(
+    ("shape", "width", "height", "wrap"),
+    [("triangle", 6, 4, True), ("square", 3, 3, True), ("hexagon", 600, 2, False)],
+)
+def test_any_valid_grid_size_is_shown_and_applied_unchanged(
+    config, font, shape, width, height, wrap
+):
+    """The fields used to clamp to 5..500, so a valid 6x4 triangle config showed 6x5 and Apply
+    then refused the odd height it had made up."""
+    sized = _grid_config(config, shape=shape, width=width, height=height, wrap=wrap)
+    panel, applied = _make_panel(sized, [Lifeform(1, CONWAY)], font)
+    assert (panel.width_input.text, panel.height_input.text) == (str(width), str(height))
+    _click_apply(panel)
+    assert panel.error is None
+    assert (applied[0][0].grid.width, applied[0][0].grid.height) == (width, height)
+
+
+def test_a_wrapped_size_below_the_shape_minimum_is_refused_with_the_minimum(config, font):
+    panel, applied = _make_panel(
+        _grid_config(config, shape="triangle"), [Lifeform(1, CONWAY)], font
+    )
+    panel.width_input.text, panel.height_input.text = "4", "2"
+    _click_apply(panel)
+    assert applied == []
+    assert "at least 6 x 4" in panel.error
+
+
+@pytest.mark.parametrize(
+    ("shape", "width", "height", "flagged"),
+    [
+        ("hexagon", 51, 50, ["width"]),
+        ("triangle", 50, 51, ["height"]),
+        ("triangle", 51, 51, ["width", "height"]),
+        ("triangle", 4, 50, ["width"]),
+    ],
+)
+def test_a_refused_size_outlines_the_field_at_fault(config, font, shape, width, height, flagged):
+    """F1, UI side: the inline error names the problem and the field(s) at fault are outlined."""
+    panel, applied = _make_panel(config, [Lifeform(1, CONWAY)], font)
+    panel.shape_dropdown.selected = shape
+    panel.width_input.text, panel.height_input.text = str(width), str(height)
+    _click_apply(panel)
+    assert applied == []
+    assert [name for name in ("width", "height") if getattr(panel, f"{name}_input").invalid] == (
+        flagged
+    )
+
+    panel.width_input.text, panel.height_input.text = "50", "50"
+    _click_apply(panel)
+    assert applied and not panel.width_input.invalid and not panel.height_input.invalid
+
+
+def test_a_refused_rule_is_outlined_and_scrolled_into_view(make_app, ui):
+    """F2, UI side: with 10 species the bad row may be scrolled away or its section collapsed;
+    a failed Apply opens the section, scrolls the row into view and outlines that field."""
+    app = make_app(simulation={"n_lifeforms": 10})
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    bad = panel.rule_inputs[9][1]
+    bad.text = "2,9"
+    u.click(panel.species_section.header_rect.center)  # collapse Species
+    u.click(panel.apply_button.rect.center)
+    u.frame()
+
+    assert panel.error == "Species 10 survive: 9 exceeds the 8 neighbours this shape has."
+    assert panel.species_section.expanded
+    assert bad.invalid and not panel.rule_inputs[9][0].invalid
+    assert panel._content_clip.contains(bad.rect)
+    red = pygame.surfarray.array3d(app.screen)[
+        bad.rect.left, bad.rect.top + 8 : bad.rect.bottom - 8
+    ]
+    assert np.all(red == widgets.ERROR_COLOR)
