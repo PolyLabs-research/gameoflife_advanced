@@ -13,9 +13,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The 3D torus view (V key). Its matrices are plain numpy, so pyrr (unmaintained; it sets
+# ndarray.shape, which NumPy 2.5 deprecates) is no longer needed.
 torus = [
     "moderngl>=5.10",
-    "pyrr>=0.10.3",
 ]
 
 [project.scripts]
