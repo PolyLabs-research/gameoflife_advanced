@@ -19,7 +19,12 @@ reachable however many species there are. A click goes to exactly one widget —
 under the pointer — after any focused field the click is not on has committed and blurred (a
 species-count change made that way adds or removes rows before the click is routed, so it never
 reaches a removed row). An open Shape list takes the click for itself. Widgets in a collapsed
-section, or scrolled out of view, have no on-screen rect and get no events.
+section have no on-screen rect and get no events. Only what lies inside the viewport can be
+clicked — a click on a field's scrolled-away part is a click elsewhere — and a focused field
+with no part left in view (scrolled away, or squeezed out by a smaller window) commits and
+blurs, so keys go back to the app's shortcuts. The error text is wrapped (breaking an over-long
+word) to the panel's width and at most `MAX_ERROR_LINES` lines, so it never draws past the panel
+or pushes Apply off the window.
 
 Each species row starts with the species' colour; clicking it (or pressing its number key, see
 `ui/app.py`) picks the species a grid click places — `selected_species`, highlighted here.
@@ -60,6 +65,9 @@ LABEL_COLOR = (235, 235, 245)
 SWATCH_SIZE = 14
 SCROLLBAR_WIDTH = 4
 WHEEL_STEP = ROW_HEIGHT
+# Most lines of error text drawn above Apply (more is cut short with an ellipsis), so a long
+# message cannot push Apply off the window. Every message Apply makes fits at the narrowest panel.
+MAX_ERROR_LINES = 6
 # Characters a rule field accepts from the keyboard: counts and the separators people type.
 RULE_CHARS = "0123456789, "
 # Largest width/height the fields take (a bigger loaded config raises it to its own size).
@@ -76,20 +84,49 @@ def ui_rng(seed: int) -> np.random.Generator:
     return np.random.default_rng([seed, UI_RNG_KEY]) if seed else np.random.default_rng()
 
 
-def _wrap_text(text: str, font: pygame.font.Font, width: int) -> list[str]:
-    """Greedy word wrap of `text` to lines no wider than `width` pixels (a single word wider
-    than that gets a line of its own)."""
+def _fitting_length(word: str, font: pygame.font.Font, width: int) -> int:
+    """The longest prefix of `word` (at least one character) no wider than `width` pixels."""
+    low, high = 1, len(word)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if font.size(word[:mid])[0] <= width:
+            low = mid
+        else:
+            high = mid - 1
+    return low
+
+
+def _wrap_text(
+    text: str, font: pygame.font.Font, width: int, max_lines: int | None = None
+) -> list[str]:
+    """Greedy word wrap of `text` to lines no wider than `width` pixels. A word too wide for a
+    line of its own (a long run typed into a field and echoed by an error) starts a new line
+    and is broken between characters. With `max_lines`, text past that many lines is dropped
+    and the last line kept ends in an ellipsis."""
     lines: list[str] = []
     line = ""
     for word in text.split():
+        if max_lines is not None and len(lines) > max_lines:
+            break
         candidate = f"{line} {word}" if line else word
-        if line and font.size(candidate)[0] > width:
-            lines.append(line)
-            line = word
-        else:
+        if font.size(candidate)[0] <= width:
             line = candidate
+            continue
+        if line:
+            lines.append(line)
+        while font.size(word)[0] > width and (max_lines is None or len(lines) <= max_lines):
+            cut = _fitting_length(word, font, width)
+            lines.append(word[:cut])
+            word = word[cut:]
+        line = word
     if line:
         lines.append(line)
+    if max_lines is not None and len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        while last and font.size(last + "…")[0] > width:
+            last = last[:-1]
+        lines[-1] = last + "…"
     return lines
 
 
@@ -335,8 +372,25 @@ class SettingsPanel:
         return any(w.active for w in self._inputs())
 
     def focused_rect(self) -> pygame.Rect | None:
-        """The on-screen rect of the field being typed in, if any (for the IME candidate box)."""
-        return next((w.rect for w in self._focused_inputs() if w.rect is not None), None)
+        """The visible part of the field being typed in, if any (for the IME candidate box)."""
+        visible = (self._visible_part(w.rect) for w in self._focused_inputs())
+        return next((rect for rect in visible if rect is not None), None)
+
+    def _visible_part(self, rect: pygame.Rect | None) -> pygame.Rect | None:
+        """The part of a content widget's `rect` inside the scrolling viewport, or None if no
+        part of it is (or it has no rect)."""
+        if rect is None or self._content_clip is None:
+            return rect
+        visible = rect.clip(self._content_clip)
+        return visible if visible.width and visible.height else None
+
+    def _blur_out_of_view(self) -> None:
+        """Commit and blur a focused field with no part left in the viewport — scrolled away or
+        squeezed out by a smaller window — as a click elsewhere would: typing must never edit a
+        field nobody can see, and the app's single-key shortcuts must work again."""
+        for widget in self._focused_inputs():
+            if widget.rect is not None and self._visible_part(widget.rect) is None:
+                widget.blur()
 
     def _section_widgets(self, section: CollapsibleSection) -> list:
         if section is self.grid_section:
@@ -394,7 +448,10 @@ class SettingsPanel:
 
         pos = event.pos
         for widget in self._focused_inputs():
-            if widget.rect is None or not widget.rect.collidepoint(pos):
+            # Only the field's visible part counts as on it: a click on a stat card or Apply
+            # that its scrolled-away part lies under is elsewhere.
+            visible = self._visible_part(widget.rect)
+            if visible is None or not visible.collidepoint(pos):
                 widget.blur()  # may resize the species rows: routed below with the new list
 
         if self.apply_button.handle_event(event):
@@ -421,8 +478,23 @@ class SettingsPanel:
         if self._scroll_area is None or not self._scroll_area.collidepoint(pointer):
             return False
         if self.max_scroll > 0:
+            previous = self.scroll_y
             self.scroll_y = max(0, min(self.max_scroll, self.scroll_y - event.y * WHEEL_STEP))
+            # Move the drawn rects with the content now, not at the next draw, so the events
+            # after this one in the same frame (a click, typed text) meet the widgets where the
+            # scroll put them — and a field it took out of view no longer takes the keys.
+            self._move_content(previous - self.scroll_y)
+            self._blur_out_of_view()
         return True
+
+    def _move_content(self, dy: int) -> None:
+        """Shift every on-screen rect in the scrolling area `dy` pixels down."""
+        for widget in self._content_widgets():
+            name = "header_rect" if isinstance(widget, CollapsibleSection) else "rect"
+            rect = getattr(widget, name)
+            if rect is not None:
+                setattr(widget, name, rect.move(0, dy))
+        self._species_label_rects = [rect.move(0, dy) for rect in self._species_label_rects]
 
     # --- drawing -----------------------------------------------------------------
 
@@ -498,7 +570,9 @@ class SettingsPanel:
         Returns the height used."""
         rows = self._rows(surface, x, width)
         content_height = sum(row_height for row_height, _ in rows)
-        error_lines = _wrap_text(self.error, self.font, width) if self.error else []
+        error_lines = []
+        if self.error:
+            error_lines = _wrap_text(self.error, self.font, width, MAX_ERROR_LINES)
         line_height = self.font.get_linesize()
         footer_height = ROW_HEIGHT
         if error_lines:
@@ -520,13 +594,16 @@ class SettingsPanel:
             draw_row(cursor)
             cursor += row_height
         surface.set_clip(previous_clip)
+        self._blur_out_of_view()
         self._scroll_to_reveal(content_rect)
         if self.max_scroll > 0:
             self._draw_scrollbar(surface, content_rect, content_height)
 
         cursor = content_rect.bottom
         for line in error_lines:
-            surface.blit(self.font.render(line, True, ERROR_COLOR), (x, cursor))
+            line_rect = pygame.Rect(x, cursor, width, line_height)
+            label = self.font.render(line, True, ERROR_COLOR)
+            blit_clipped(surface, label, line_rect.topleft, line_rect)
             cursor += line_height
         if error_lines:
             cursor += CONTROL_GAP

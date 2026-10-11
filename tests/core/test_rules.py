@@ -155,3 +155,25 @@ def test_parse_count_list_rejects_counts_above_the_shape_degree():
     with pytest.raises(ValueError, match="9 exceeds the 8 neighbours"):
         parse_count_list("3,9", max_count=8)
     assert parse_count_list("3,9") == {3, 9}  # no limit given
+
+
+def test_parse_count_list_echoes_a_long_count_shortened():
+    """A long digit run typed into a rule field was echoed whole, one unbroken word wider than
+    the settings panel."""
+    with pytest.raises(ValueError) as caught:
+        parse_count_list("3," + "1" * 60, max_count=8)
+    assert str(caught.value) == "11111…11111 exceeds the 8 neighbours this shape has"
+
+
+def test_parse_count_list_refuses_a_run_past_the_int_conversion_limit_as_too_big():
+    """int() of more than 4300 digits raises its own 'Exceeds the limit ...' ValueError."""
+    with pytest.raises(ValueError, match="exceeds the 12 neighbours"):
+        parse_count_list("9" * 5000, max_count=12)
+
+
+def test_parse_count_list_reads_leading_zeros_and_shortens_echoed_text():
+    assert parse_count_list("007, 0", max_count=8) == {0, 7}
+    with pytest.raises(ValueError, match="^9 exceeds"):
+        parse_count_list("0009", max_count=8)
+    with pytest.raises(ValueError, match=r"^no neighbour counts in ',,,,,…,,,,,'$"):
+        parse_count_list("," * 40, max_count=8)

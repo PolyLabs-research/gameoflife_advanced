@@ -76,28 +76,38 @@ def format_count_list(counts: Iterable[int]) -> str:
     return ",".join(str(v) for v in _sorted_counts(counts))
 
 
+def _excerpt(text: str, limit: int = 12) -> str:
+    """`text` as an error message echoes it: whole when short, else its two ends around an
+    ellipsis, so one long run typed into a field cannot swamp the message."""
+    return text if len(text) <= limit else f"{text[:5]}…{text[-5:]}"
+
+
 def parse_count_list(text: str, max_count: int | None = None) -> set[int]:
     """Parse a typed rule field. Every run of ASCII digits 0-9 is one count and anything else
     separates them (`'2,3'`, `'2 3'`, `'2;10'`). Raises ValueError with a message fit to show
     the user when the text holds a non-ASCII digit (e.g. `'²'` or `'３'`, which would otherwise
     vanish silently as a separator), has no digits at all, or names a count above `max_count`.
-    Empty text is the empty set."""
+    Long text the message echoes is shortened (`_excerpt`). Empty text is the empty set."""
     stripped = text.strip()
     if not stripped:
         return set()
     for ch in stripped:
         if ch not in _ASCII_DIGITS and (ch.isdigit() or ch.isnumeric()):
             raise ValueError(f"'{ch}' is not a digit 0-9")
-    tokens = _DIGIT_RUNS.findall(stripped)
+    # Without leading zeros a count's length bounds its size, so a long run is refused as too
+    # big without int(), which raises its own error past 4300 digits.
+    tokens = {token.lstrip("0") or "0" for token in _DIGIT_RUNS.findall(stripped)}
     if not tokens:
-        raise ValueError(f"no neighbour counts in {stripped!r}")
-    counts = {int(token) for token in tokens}
+        raise ValueError(f"no neighbour counts in {_excerpt(stripped)!r}")
     if max_count is not None:
-        too_big = sorted(v for v in counts if v > max_count)
+        too_big = sorted(
+            (t for t in tokens if len(t) > len(str(max_count)) or int(t) > max_count),
+            key=lambda t: (len(t), t),
+        )
         if too_big:
-            listed = ", ".join(str(v) for v in too_big)
+            listed = ", ".join(_excerpt(t) for t in too_big)
             raise ValueError(f"{listed} exceeds the {max_count} neighbours this shape has")
-    return counts
+    return {int(token) for token in tokens}
 
 
 @dataclass(frozen=True)

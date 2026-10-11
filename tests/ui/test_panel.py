@@ -539,3 +539,164 @@ def test_a_refused_rule_is_outlined_and_scrolled_into_view(make_app, ui):
         bad.rect.left, bad.rect.top + 8 : bad.rect.bottom - 8
     ]
     assert np.all(red == widgets.ERROR_COLOR)
+
+
+# --- focus and scrolling, error text ----------------------------------------------------------
+
+
+def test_a_focused_field_scrolled_out_of_view_commits_and_frees_the_shortcuts(make_app, ui):
+    """A focused field the wheel scrolled away kept focus: typing edited it unseen and Space,
+    N, R, S and V did nothing."""
+    app = make_app(simulation={"n_lifeforms": 10})
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    width = panel.width_input
+    u.click(width.rect.center)
+    u.clear_field()
+    u.type("40")
+
+    u.wheel(-20, over=(150, 400))
+    assert not panel._content_clip.colliderect(width.rect)
+    assert not width.active and width.value == 40  # committed, as a click elsewhere would
+    assert panel.focused_rect() is None
+    u.key(pygame.K_SPACE, " ")
+    assert app.session.paused
+    u.type("9")
+    assert width.text == "40"
+
+
+def test_a_focused_field_a_smaller_window_squeezes_out_of_view_commits(make_app, ui):
+    app = make_app(simulation={"n_lifeforms": 10})
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    birth = panel.rule_inputs[5][0]
+    assert panel._content_clip.contains(birth.rect)
+    u.click(birth.rect.center)
+    u.type("4")
+
+    pygame.event.post(pygame.event.Event(pygame.VIDEORESIZE, w=1200, h=500, size=(1200, 500)))
+    u.frame()
+
+    assert not panel._content_clip.colliderect(birth.rect)
+    assert not birth.active and birth.text == "34"
+    u.key(pygame.K_SPACE, " ")
+    assert app.session.paused
+
+
+def test_keys_in_the_same_frame_as_the_scroll_reach_the_shortcuts(make_app, ui):
+    app = make_app(simulation={"n_lifeforms": 10})
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    u.click(panel.width_input.rect.center)
+    assert panel.width_input.active
+
+    pygame.event.post(
+        pygame.event.Event(pygame.MOUSEMOTION, pos=(150, 400), rel=(0, 0), buttons=(0, 0, 0))
+    )
+    pygame.event.post(pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=-20, flipped=False))
+    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE, unicode=" ", mod=0))
+    pygame.event.post(pygame.event.Event(pygame.TEXTINPUT, text="9"))
+    u.frame()
+
+    assert app.session.paused
+    assert not panel.width_input.active and panel.width_input.text == "50"
+
+
+def test_a_click_in_the_same_frame_as_the_scroll_meets_the_scrolled_widgets(make_app, ui):
+    app = make_app(simulation={"n_lifeforms": 10})
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    spot = panel.rule_inputs[4][0].rect.center  # species 6's birth field after one notch
+
+    pygame.event.post(
+        pygame.event.Event(pygame.MOUSEMOTION, pos=(150, 400), rel=(0, 0), buttons=(0, 0, 0))
+    )
+    pygame.event.post(pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=-1, flipped=False))
+    pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=spot, button=1))
+    u.frame()
+
+    assert panel.scroll_y == panel_module.WHEEL_STEP
+    assert panel.rule_inputs[5][0].active and not panel.rule_inputs[4][0].active
+
+
+def test_only_the_visible_part_of_a_field_counts_as_on_it(make_app, ui):
+    """A click above the viewport, over the stat cards, landed in a half-scrolled field's
+    hidden part and so did not blur it."""
+    app = make_app(simulation={"n_lifeforms": 10})
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    width = panel.width_input
+    u.click(width.rect.center)
+    clip = panel._content_clip
+    panel.scroll_y = width.rect.top - clip.top + 10  # the field straddles the viewport top
+    u.frame()
+    assert width.rect.top < clip.top < width.rect.bottom
+    assert width.active  # partly visible: still being typed in
+    assert panel.focused_rect() == width.rect.clip(clip)
+
+    u.click((width.rect.centerx, clip.top - 4))
+    assert not width.active
+
+
+def _any_red(pixels: np.ndarray) -> bool:
+    """True if any pixel of an (..., 3) array is error-text red (or antialiased toward it)."""
+    return bool(np.any((pixels[..., 0] > 150) & (pixels[..., 1] < 140) & (pixels[..., 2] < 140)))
+
+
+def test_a_long_error_is_drawn_inside_the_panel_and_apply_stays_put(config, font):
+    """An error echoing a long digit run drew one unbroken line past the panel into the gutter;
+    a long enough one would push Apply off the window."""
+    panel, _ = _make_panel(config, [Lifeform(1, CONWAY)], font)
+    panel.error = "Species 1 birth: " + "1" * 5000 + " exceeds the 8 neighbours this shape has."
+    surface = pygame.Surface((800, 700))
+    panel.draw(surface, 16, 16, 300, 600)
+
+    pixels = pygame.surfarray.array3d(surface)  # indexed [x, y]
+    assert not _any_red(pixels[316:])
+    error_height = panel_module.MAX_ERROR_LINES * font.get_linesize() + panel_module.CONTROL_GAP
+    apply_top = panel.apply_button.rect.top
+    assert apply_top - panel._content_clip.bottom == error_height
+    assert _any_red(pixels[16:316, apply_top - error_height : apply_top])
+    assert panel.apply_button.rect.bottom <= 616
+
+    # Clipped to the column even where a single character is wider than it.
+    panel.error = "W" * 3
+    surface.fill((0, 0, 0))
+    panel.draw(surface, 16, 16, 4, 600)
+    assert not _any_red(pygame.surfarray.array3d(surface)[20:])
+
+
+def test_a_long_rule_is_refused_with_a_short_error_drawn_inside_the_panel(make_app, ui):
+    app = make_app()
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    birth = panel.rule_inputs[0][0]
+    u.click(birth.rect.center)
+    u.type("1" * 60)
+    u.click(panel.apply_button.rect.center)
+    u.frame()
+
+    assert panel.error == "Species 1 birth: 31111…11111 exceeds the 8 neighbours this shape has."
+    gutter = pygame.Rect(panel._content_clip.right, panel._content_clip.bottom, 0, 0)
+    gutter.width = app.layout.grid_rect().left - gutter.left
+    gutter.height = panel.apply_button.rect.top - gutter.top
+    assert not _any_red(pygame.surfarray.array3d(app.screen.subsurface(gutter)))
+
+
+def test_wrap_text_breaks_an_over_long_word_and_caps_the_lines(font):
+    text = "Species 1 birth: " + "1" * 200 + " exceeds the 8 neighbours"
+    lines = panel_module._wrap_text(text, font, 120)
+    assert all(font.size(line)[0] <= 120 for line in lines)
+    assert "".join(lines).replace(" ", "") == text.replace(" ", "")
+    assert lines[0] == "Species 1 birth:"
+
+    capped = panel_module._wrap_text(text, font, 120, max_lines=3)
+    assert capped[:2] == lines[:2] and len(capped) == 3
+    assert capped[2].endswith("…") and font.size(capped[2])[0] <= 120
+    assert panel_module._wrap_text("short text", font, 120, max_lines=3) == ["short text"]
