@@ -412,6 +412,57 @@ def test_concurrent_checkpoint_saves_never_crash_or_tear(tmp_path):
     assert list(path.parent.glob("*.tmp")) == []
 
 
+@pytest.mark.parametrize("umask", [0o002, 0o022, 0o077])
+def test_checkpoint_gets_the_umask_permissions_like_the_lineages_other_files(
+    tmp_path, log_dir, monkeypatch, umask
+):
+    """Checkpoints went through tempfile.mkstemp, which always creates 0600, so they became
+    owner-only while the lock and discovered-rules files next to them followed the umask."""
+    config = _fast_config(tmp_path)
+    old_umask = os.umask(umask)
+    try:
+        worker = _run_in_process(config, "square", monkeypatch, _StopAfterEvaluations(4, 0.99))
+        lone = tmp_path / "lone" / "checkpoint.json"
+        worker_module._save_checkpoint(lone, es.from_checkpoint_dict(_checkpoint(worker)))
+    finally:
+        os.umask(old_umask)
+
+    def mode(path):
+        return oct(path.stat().st_mode & 0o777)
+
+    expected = oct(0o666 & ~umask)
+    assert worker.discovered_path.exists()
+    assert mode(worker.checkpoint_path) == expected
+    assert mode(lone) == expected
+    assert mode(worker.discovered_path) == expected
+    assert mode(Path(f"{worker.checkpoint_path}.lock")) == expected
+    assert list(worker.checkpoint_path.parent.glob("*.tmp")) == []
+
+
+def test_checkpoint_temp_names_do_not_collide(tmp_path):
+    """Each save opens its own new file (O_EXCL), so concurrent writers never share one."""
+    opened = [worker_module._create_temp_file(tmp_path, "ck.json.") for _ in range(50)]
+    for fd, _ in opened:
+        os.close(fd)
+    names = [Path(name) for _, name in opened]
+    assert len(set(names)) == 50
+    assert all(n.parent == tmp_path and n.name.startswith("ck.json.") for n in names)
+    assert all(n.suffix == ".tmp" for n in names)
+
+
+def test_checkpoint_temp_file_retries_a_taken_name(tmp_path, monkeypatch):
+    taken = tmp_path / "ck.json.aaaaaaaaaaaa.tmp"
+    taken.write_text("someone else's")
+    tokens = iter(["aaaaaaaaaaaa", "bbbbbbbbbbbb"])
+    monkeypatch.setattr(worker_module.secrets, "token_hex", lambda _n: next(tokens))
+
+    fd, name = worker_module._create_temp_file(tmp_path, "ck.json.")
+    os.close(fd)
+
+    assert name == str(tmp_path / "ck.json.bbbbbbbbbbbb.tmp")
+    assert taken.read_text() == "someone else's"
+
+
 def test_second_worker_on_a_locked_lineage_exits_and_others_still_run(tmp_path, log_dir):
     """F66: a second run on the same checkpoint replayed the first one's generations and both
     overwrote the checkpoint. It now refuses; a different lineage is unaffected."""

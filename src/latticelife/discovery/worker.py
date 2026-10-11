@@ -15,8 +15,9 @@ lineage; changing any of those settings starts (or resumes) a different one. The
 
 One writer per lineage. The worker holds an exclusive lock on `<checkpoint>.lock` for its whole
 life; a second worker for the same lineage logs `checkpoint_locked` and exits with
-`EXIT_LOCKED` instead of racing the first. Checkpoints are written to a unique temporary file,
-fsynced and renamed into place. A checkpoint that cannot be used is renamed aside to
+`EXIT_LOCKED` instead of racing the first. Checkpoints are written to a unique temporary file
+(created with the umask's permissions, like the worker's other files), fsynced and renamed into
+place. A checkpoint that cannot be used is renamed aside to
 `<name>.unusable-<UTC time>` with an error event, and the lineage starts fresh.
 
 Discovered rules (`discovery.discovered_path`) get one row per rule per lineage, written when its
@@ -40,9 +41,11 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import errno
 import json
 import multiprocessing as mp
 import os
+import secrets
 import signal
 import sys
 import tempfile
@@ -260,13 +263,30 @@ def _load_checkpoint(checkpoint_path: Path, settings: dict[str, Any]) -> es.ESSt
     return state
 
 
+def _create_temp_file(directory: Path, prefix: str) -> tuple[int, str]:
+    """Create and open a new, uniquely named `<prefix><random>.tmp` in `directory`, like
+    `tempfile.mkstemp` but with mode 0666 filtered by the umask (and any default ACL), as
+    `open(..., 'w')` would create it. mkstemp always creates 0600, and the rename keeps that
+    mode, so checkpoints became owner-only while the lock and discovered-rules files next to
+    them stayed group-readable."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    for _ in range(tempfile.TMP_MAX):
+        name = str(directory / f"{prefix}{secrets.token_hex(6)}.tmp")
+        try:
+            return os.open(name, flags, 0o666), name
+        except FileExistsError:
+            continue
+    raise FileExistsError(errno.EEXIST, "no unused temporary file name", str(directory))
+
+
 def _save_checkpoint(checkpoint_path: Path, state: es.ESState) -> None:
     """Atomic replace: a unique temporary file in the same directory (concurrent writers can
     never share or truncate each other's), fsynced before the rename, then the directory
-    fsynced so the rename itself survives a crash."""
+    fsynced so the rename itself survives a crash. The checkpoint gets the umask's permissions
+    (`_create_temp_file`), as every other file in the discovery directory does."""
     directory = checkpoint_path.parent
     directory.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=f"{checkpoint_path.name}.", suffix=".tmp")
+    fd, tmp_name = _create_temp_file(directory, f"{checkpoint_path.name}.")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(es.to_checkpoint_dict(state), f)
