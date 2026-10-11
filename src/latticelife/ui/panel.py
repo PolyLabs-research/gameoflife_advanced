@@ -110,9 +110,8 @@ class SettingsPanel:
         reusing the same `Rule.random` the ES discovery process samples candidates from."""
         shape = self.shape_dropdown.selected or self.config.grid.shape
         n = max_degree(shape, self.config.grid.triangle_mode)
-        rule = Rule.random(
-            n, self.config.discovery.p_birth, self.config.discovery.p_survive, np.random.default_rng()
-        )
+        discovery = self.config.discovery
+        rule = Rule.random(n, discovery.p_birth, discovery.p_survive, np.random.default_rng())
         birth_input, survive_input = self.rule_inputs[index]
         birth_input.text = _rule_string(rule.birth)
         survive_input.text = _rule_string(rule.survive)

@@ -48,7 +48,9 @@ STATIC_COLORS = [
 ]
 
 
-def fit_cell_size(shape: str, width: int, height: int, available_width: int, available_height: int) -> int:
+def fit_cell_size(
+    shape: str, width: int, height: int, available_width: int, available_height: int
+) -> int:
     """Largest integer cell size that fits a `width` x `height` grid of `shape` cells within
     `available_width` x `available_height` pixels. Square cells tile edge-to-edge (1 unit of
     size per column/row), but hex/triangle cells overlap the way `hexagon_corners`/
