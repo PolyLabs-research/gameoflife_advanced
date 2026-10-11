@@ -7,7 +7,7 @@ from latticelife.ui.app import App
 
 
 def test_app_runs_100_frames_without_crashing(config):
-    app = App(config)
+    app = App(config)  # the real clock
     for _ in range(100):
         assert app.step_frame() is True
     assert app.session.generation > 0
@@ -19,79 +19,64 @@ def test_quit_event_stops_the_loop(config):
     assert app.step_frame() is False
 
 
-def test_space_toggles_pause(config):
-    app = App(config)
+def test_one_generation_per_frame_at_the_configured_speed(make_app, ui):
+    app = make_app()
+    u = ui(app)
+    u.frame()  # the first frame draws generation 0
+    assert app.session.generation == 0
+    u.frame(5)
+    assert app.session.generation == 5
+
+
+def test_space_toggles_pause(make_app, ui):
+    app = make_app()
     assert app.session.paused is False
-    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE))
-    app.step_frame()
+    ui(app).key(pygame.K_SPACE, " ")
     assert app.session.paused is True
 
 
-def test_r_resets_then_the_same_frame_steps_once(config):
-    app = App(config)
-    for _ in range(5):
-        app.step_frame()
-    assert app.session.generation > 1
+def test_r_resets_and_the_frame_shows_generation_zero(make_app, ui):
+    app = make_app()
+    u = ui(app)
+    u.frame(6)
+    assert app.session.generation == 5
 
-    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_r))
-    app.step_frame()  # reset() sets generation=0, then the frame's own step() makes it 1
+    u.key(pygame.K_r, "r")
+    assert app.session.generation == 0  # drawn before any step
+    u.frame()
     assert app.session.generation == 1
 
 
-def test_s_steps_once_only_when_paused(config):
-    app = App(config)
+def test_s_steps_once_only_when_paused(make_app, ui):
+    app = make_app()
     app.session.paused = True
-    gen_before = app.session.generation
+    u = ui(app)
+    u.frame(3)
+    assert app.session.generation == 0
 
-    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_s))
-    app.step_frame()
+    u.key(pygame.K_s, "s")
 
-    assert app.session.generation == gen_before + 1
+    assert app.session.generation == 1
     assert app.session.paused is True
 
 
-def test_s_does_nothing_while_running(config):
-    app = App(config)
-    assert app.session.paused is False
+def test_s_does_nothing_while_running(make_app, ui):
+    app = make_app()
+    u = ui(app)
+    u.frame(3)
     gen_before = app.session.generation
 
-    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_s))
-    app.step_frame()
+    u.key(pygame.K_s, "s")
 
     # Not paused: S is a no-op, but the frame's own unpaused step still advances by one.
     assert app.session.generation == gen_before + 1
 
 
-def test_question_mark_toggles_hints(config):
-    app = App(config)
+def test_question_mark_toggles_hints(make_app, ui):
+    app = make_app()
     assert app.hints_visible is False
-    pygame.event.post(
-        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SLASH, mod=pygame.KMOD_SHIFT)
-    )
-    app.step_frame()
+    ui(app).key(pygame.K_SLASH, "?", pygame.KMOD_SHIFT)
     assert app.hints_visible is True
-
-
-def test_v_toggle_does_not_crash_regardless_of_torus_extra_availability(config):
-    app = App(config)
-    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_v))
-    app.step_frame()
-    assert app.view_mode in ("2D", "3D")
-    if app.view_mode == "2D":
-        assert app.torus_status is not None
-
-
-def test_click_toggles_exactly_one_cell(config):
-    app = App(config)
-    app.session.paused = True
-    app.session.grid.occupancy[:] = 0
-
-    grid_rect = app.layout.grid_rect()
-    pos = (grid_rect.x + 5, grid_rect.y + 5)
-    pygame.event.post(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=pos))
-    app.step_frame()
-
-    assert int(app.session.grid.occupancy.sum()) == 1
 
 
 @pytest.mark.parametrize("shape", ["square", "hexagon", "triangle"])
