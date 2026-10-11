@@ -9,14 +9,14 @@ import os
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
-from latticelife.config import load_config
+from latticelife.config import DEFAULT_CONFIG_PATH, load_config
 from latticelife.ui.app import App
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--frames", type=int, default=100)
-    parser.add_argument("--config", default="config/default.toml")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     args = parser.parse_args()
 
     config = load_config(args.config)

@@ -12,7 +12,8 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" /
 
 def _fast_config(tmp_path, **discovery_overrides):
     """A discovery config trimmed for fast worker-process tests: small population/grid/steps so
-    a generation completes in well under a second, and a per-test checkpoint directory."""
+    a generation completes in well under a second, and per-test checkpoint, discovered-rules and
+    log paths so a test run never appends to the project's real `out/`."""
     base = load_config(DEFAULT_CONFIG_PATH)
     overrides = {
         "mu": 2,
@@ -21,9 +22,14 @@ def _fast_config(tmp_path, **discovery_overrides):
         "grid_size": 8,
         "steps": 15,
         "checkpoint_path": str(tmp_path / "discovery"),
+        "discovered_path": str(tmp_path / "discovered_rules.jsonl"),
     }
     overrides.update(discovery_overrides)
-    return replace(base, discovery=replace(base.discovery, **overrides))
+    return replace(
+        base,
+        discovery=replace(base.discovery, **overrides),
+        logging=replace(base.logging, dir=str(tmp_path / "logs")),
+    )
 
 
 def test_worker_runs_and_produces_a_checkpoint(tmp_path):
@@ -99,3 +105,31 @@ def test_discovery_worker_does_not_contaminate_main_process_rng(tmp_path):
         worker.join(timeout=5)
 
     assert a == b
+
+
+def test_worker_writes_rules_and_logs_where_the_config_says(tmp_path, monkeypatch):
+    """F16: the discovered-rules file and the worker's JSONL log follow the config, not the
+    current directory. The parent's own log dir is pointed elsewhere under tmp_path, so a child
+    that ignored the config would log there (never into the project's real out/)."""
+    from latticelife import logging as ll_logging
+
+    monkeypatch.delenv(ll_logging.LOG_DIR_ENV, raising=False)
+    monkeypatch.setattr(ll_logging, "_configured_dir", tmp_path / "parent-logs")
+    monkeypatch.chdir(tmp_path)
+    config = _fast_config(tmp_path)
+    worker = DiscoveryWorker(config, shape="square")
+    assert worker.discovered_path == tmp_path / "discovered_rules.jsonl"
+
+    worker.start()
+    try:
+        deadline = time.monotonic() + 20
+        while not worker.checkpoint_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+    finally:
+        worker.stop()
+        worker.join(timeout=5)
+
+    events = (tmp_path / "logs" / "discovery.jsonl").read_text().splitlines()
+    assert json.loads(events[0])["event"] == "worker_started"
+    assert not (tmp_path / "parent-logs").exists()
+    assert not (tmp_path / "out").exists()

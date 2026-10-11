@@ -18,6 +18,17 @@ uv run python -m latticelife.cli discover --minutes 30                 # (mu+lam
 
 3D torus rendering (the `V` key in `ui`) needs the optional extra: `uv sync --extra torus`.
 
+## Configuration
+
+Every tunable lives in `config/default.toml` (pass `--config PATH` for another file). Each key is
+checked when the file loads, and a bad value stops the command with an error naming the key. With
+wrap on, hexagon grids need an even width and triangle grids an even width and height.
+
+Relative output paths in a config (`recording.db_path`, `discovery.checkpoint_path`,
+`discovery.discovered_path`, `logging.dir`) resolve against the project root (the nearest folder
+above the config file that holds `pyproject.toml`), not the directory you run from. Set
+`LATTICELIFE_LOG_DIR` to send the JSONL logs somewhere else.
+
 ## Development
 
 ```bash

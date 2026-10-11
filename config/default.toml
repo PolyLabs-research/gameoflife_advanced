@@ -1,15 +1,19 @@
+# Every key is validated on load (latticelife.config.validate_config). Relative output paths
+# (recording.db_path, discovery.checkpoint_path, discovery.discovered_path, logging.dir) resolve
+# against the project root: the nearest folder at or above this file holding pyproject.toml.
+
 [grid]
 shape = "square"            # square | hexagon | triangle
-width = 50
+width = 50                  # with wrap: hexagon needs an even width, triangle even width+height
 height = 50
 wrap = true
 triangle_mode = "edge+vertex"   # edge | edge+vertex
 
 [simulation]
 initial_alive_percentage = 0.5
-n_lifeforms = 1
+n_lifeforms = 1             # 1..10
 static_threshold = 10       # lifespan above which a cell counts as static
-history_limit = 300
+history_limit = 300         # >= alerts.sudden_death_window
 seed = 0                    # 0 = draw fresh entropy; nonzero = reproducible
 
 [metrics]
@@ -29,13 +33,14 @@ batch_size = 1000
 mu = 5                      # elites carried forward
 n_offspring = 15            # the lambda in (mu+lambda)
 evals_per_candidate = 3
-grid_size = 64
+grid_size = 64              # always wrapped; must suit every shape (even, >= 6)
 steps = 200
 p_birth = 0.3
 p_survive = 0.3
 mutation_rate = 0.08        # per-bit flip probability, Rule.mutate semantics
 save_threshold = 0.8
 checkpoint_path = "out/discovery"
+discovered_path = "out/discovered_rules.jsonl"
 
 [criticality]
 # band thresholds and weights, values as in legacy criticality_score.py
@@ -79,4 +84,7 @@ band = 0.5
 growth = 0.5
 
 [ui]
-fps = 30
+fps = 30                    # 1..60
+
+[logging]
+dir = "out/logs"            # app.jsonl and discovery.jsonl (LATTICELIFE_LOG_DIR overrides)

@@ -16,16 +16,15 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from latticelife.config import Config, load_config
+from latticelife.config import DEFAULT_CONFIG_PATH, Config, load_config
 from latticelife.core.geometries import max_degree
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
 from latticelife.discovery.worker import DiscoveryWorker
-from latticelife.logging import log_event
+from latticelife.logging import configure_logging, log_event
 from latticelife.recording.recorder import Recorder
 from latticelife.session.session import SimulationSession
 
-DEFAULT_CONFIG_PATH = Path("config/default.toml")
 SHAPES = ("square", "hexagon", "triangle")
 
 
@@ -93,8 +92,15 @@ def _randomise_session_params(
     return session_config, lifeforms
 
 
+def _load_config(path: Path) -> Config:
+    """Load the config and send this process's JSONL logs to its `logging.dir` (§6.10)."""
+    config = load_config(path)
+    configure_logging(config.logging.dir)
+    return config
+
+
 def run_autorun(args: argparse.Namespace) -> dict:
-    config = load_config(args.config)
+    config = _load_config(args.config)
     db_path = args.db if args.db is not None else Path(config.recording.db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -127,7 +133,7 @@ def run_autorun(args: argparse.Namespace) -> dict:
 def run_discover(args: argparse.Namespace) -> None:
     """Runs the ES worker in the foreground for up to `--minutes`, with signal-based clean
     shutdown: SIGINT sets the worker's stop event instead of killing the process outright."""
-    config = load_config(args.config)
+    config = _load_config(args.config)
     worker = DiscoveryWorker(config, shape=args.shape)
 
     def handle_sigint(signum: int, frame: object) -> None:
@@ -150,7 +156,7 @@ def run_ui(args: argparse.Namespace) -> None:
     in pygame on their path (§6.13's headless commands must never import pygame)."""
     from latticelife.ui.app import App
 
-    config = load_config(args.config)
+    config = _load_config(args.config)
     App(config).run()
 
 

@@ -18,7 +18,7 @@ import numpy as np
 
 from latticelife.config import Config
 from latticelife.discovery import es
-from latticelife.logging import log_event
+from latticelife.logging import configure_logging, log_event
 
 
 class DiscoveryWorker:
@@ -26,7 +26,7 @@ class DiscoveryWorker:
         self.config = config
         self.shape = shape
         self.checkpoint_path = Path(config.discovery.checkpoint_path) / "checkpoint.json"
-        self.discovered_path = Path("out/discovered_rules.jsonl")
+        self.discovered_path = Path(config.discovery.discovered_path)
         self._stop_event: mp.synchronize.Event = mp.Event()
         self._process: mp.Process | None = None
 
@@ -97,6 +97,7 @@ def _run_loop(
     discovered_path: Path,
     stop_event: mp.synchronize.Event,
 ) -> None:
+    configure_logging(config.logging.dir)  # a spawned child does not inherit the parent's
     state = _load_checkpoint(checkpoint_path)
     if state is None:
         entropy = int(np.random.SeedSequence().entropy % (2**63))
