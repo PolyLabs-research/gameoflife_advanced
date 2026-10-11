@@ -9,8 +9,13 @@ the display, and runs the same with or without a desktop.
 `TorusView.draw` follows the grid it is given every frame (shape, size, palette, static
 threshold), so a new session from Apply or New, or a resized window, needs no rebuild: the
 texture, framebuffer and camera aspect follow on the next draw. Mouse input reaches the camera
-through `handle_event`. `release()` frees every GL object and the context; the app calls it when
-it leaves 3D or exits.
+through `handle_event`. `release()` frees every GL object, and the context if the view made it;
+the app calls it when it leaves 3D or exits.
+
+The app hands every view it makes one context (`create_offscreen_context`), kept until it
+closes: the driver does not give back everything of a context that is created, used and
+destroyed, so a fresh context per V press would grow memory and driver threads a little on
+every toggle.
 
 Contexts. moderngl draws with whichever context is current on the thread, so each public method
 makes the view's context current for its whole body (`with self.ctx:`) — once, never nested:

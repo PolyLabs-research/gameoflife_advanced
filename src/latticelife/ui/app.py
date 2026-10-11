@@ -53,6 +53,8 @@ from latticelife.ui.panel import SettingsPanel, ui_rng
 from latticelife.ui.widgets import Button, blit_clipped
 
 if TYPE_CHECKING:  # never imported at run time: the [torus] extra is optional
+    import moderngl
+
     from latticelife.ui.torus.view import TorusView
 
 WINDOW_WIDTH = 1200
@@ -348,6 +350,10 @@ class App:
         self.torus_view: TorusView | None = None
         self.torus_status: str | None = None
         self._torus_status_left = 0.0
+        # The offscreen OpenGL context every 3D view draws with: made on the first V and kept
+        # until close(). A context per V would cost memory and driver threads on each toggle,
+        # as the driver does not give back all of a destroyed one.
+        self._gl_context: moderngl.Context | None = None
 
         self.palette = render.build_palette(self.lifeforms)
         self.geometric_renderer = render.GeometricRenderer(BACKGROUND_COLOR)
@@ -461,7 +467,7 @@ class App:
 
         try:
             # Lazy: the [torus] extra (moderngl) is optional and only needed from here on.
-            from latticelife.ui.torus.view import TorusView
+            from latticelife.ui.torus.view import TorusView, create_offscreen_context
         except ImportError:
             self._set_torus_status(
                 "3D view unavailable: install the [torus] extra (uv sync --extra torus)."
@@ -469,8 +475,11 @@ class App:
             return
 
         try:
-            view = TorusView(BACKGROUND_COLOR)
+            if self._gl_context is None:
+                self._gl_context = create_offscreen_context()
+            view = TorusView(BACKGROUND_COLOR, ctx=self._gl_context)
         except Exception as exc:  # no OpenGL 3.3, a driver that rejects the shaders, ...
+            self._release_gl_context()  # the next V starts over on a fresh context
             self._set_torus_status(f"3D view unavailable: {_short_error(exc)}")
             return
 
@@ -479,17 +488,25 @@ class App:
         self._set_torus_status(None)
 
     def _leave_3d(self, status: str | None = None) -> None:
-        """Back to 2D, releasing the 3D view's GL resources."""
+        """Back to 2D, releasing the 3D view's GL objects (the context stays for the next V)."""
         view, self.torus_view = self.torus_view, None
         self.view_mode = "2D"
         self._set_torus_status(status)
         if view is not None:
             view.release()
 
+    def _release_gl_context(self) -> None:
+        context, self._gl_context = self._gl_context, None
+        if context is not None:
+            context.release()
+
     def close(self) -> None:
-        """Release what the app holds outside pygame (the 3D view's GL context)."""
-        if self.torus_view is not None:
-            self._leave_3d()
+        """Release what the app holds outside pygame (the 3D view and its GL context)."""
+        try:
+            if self.torus_view is not None:
+                self._leave_3d()
+        finally:
+            self._release_gl_context()
 
     # --- events ------------------------------------------------------------
 
@@ -702,6 +719,9 @@ class App:
             )
         except Exception as exc:  # a lost GPU, a grid larger than a GL texture, ...
             self._leave_3d(f"3D view stopped: {_short_error(exc)}")
+            # The failure may have left the context unusable (a lost GPU, say): the next V
+            # starts over on a fresh one.
+            self._release_gl_context()
             self._draw_grid()
 
     def _status_strip(self) -> pygame.Rect:

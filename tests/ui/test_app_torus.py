@@ -25,6 +25,22 @@ VIEW_MODULE = "latticelife.ui.torus.view"
 TORUS_FILL = (1, 2, 3)  # what the stand-in draws over the grid area
 
 
+class FakeContext:
+    """Stands in for `create_offscreen_context()`'s GL context: counts what made and freed it."""
+
+    instances: list["FakeContext"] = []
+    fail: Exception | None = None
+
+    def __init__(self):
+        if FakeContext.fail is not None:
+            raise FakeContext.fail
+        self.released = 0
+        FakeContext.instances.append(self)
+
+    def release(self):
+        self.released += 1
+
+
 class FakeView:
     """Stands in for `TorusView`: records draws, routes input to a real camera, and fills the
     area it is given so tests can see where the torus went."""
@@ -33,10 +49,11 @@ class FakeView:
     fail_init: Exception | None = None
     fail_draw: Exception | None = None
 
-    def __init__(self, background):
+    def __init__(self, background, ctx=None):
         if FakeView.fail_init is not None:
             raise FakeView.fail_init
         self.background = background
+        self.ctx = ctx
         self.camera = OrbitalCamera()
         self.draws: list[tuple[pygame.Rect, object, np.ndarray]] = []
         self.released = 0
@@ -61,9 +78,10 @@ class FakeView:
 
 @pytest.fixture
 def fake_view(monkeypatch):
-    FakeView.instances = []
-    FakeView.fail_init = FakeView.fail_draw = None
-    monkeypatch.setitem(sys.modules, VIEW_MODULE, types.SimpleNamespace(TorusView=FakeView))
+    FakeView.instances, FakeContext.instances = [], []
+    FakeView.fail_init = FakeView.fail_draw = FakeContext.fail = None
+    module = types.SimpleNamespace(TorusView=FakeView, create_offscreen_context=FakeContext)
+    monkeypatch.setitem(sys.modules, VIEW_MODULE, module)
     return FakeView
 
 
@@ -97,13 +115,20 @@ def test_v_without_the_extra_says_how_to_install_it(make_app, ui, monkeypatch):
     assert "[torus] extra" in app.torus_status
 
 
-def test_v_without_opengl_says_why_and_stays_2d(make_app, ui, fake_view):
-    """F40: the old smoke test passed whether or not 3D could ever start."""
-    fake_view.fail_init = RuntimeError("no OpenGL 3.3 context (egl: no device)\ndetails")
+@pytest.mark.parametrize("failing", [FakeContext, FakeView])
+def test_v_without_opengl_says_why_and_stays_2d(make_app, ui, fake_view, failing):
+    """F40: the old smoke test passed whether or not 3D could ever start. The context, or the
+    view on it, fails; either way no context is kept for the next V to inherit."""
+    error = RuntimeError("no OpenGL 3.3 context (egl: no device)\ndetails")
+    if failing is FakeContext:
+        FakeContext.fail = error
+    else:
+        fake_view.fail_init = error
     app = make_app()
     ui(app).key(pygame.K_v, "v")
     assert app.view_mode == "2D" and app.torus_view is None
     assert app.torus_status == "3D view unavailable: no OpenGL 3.3 context (egl: no device)"
+    assert all(ctx.released == 1 for ctx in FakeContext.instances)
 
 
 def test_the_status_sits_between_the_chart_and_the_grid_and_expires(make_app, ui, fake_view):
@@ -186,6 +211,27 @@ def test_v_draws_the_torus_in_the_grid_area_and_v_again_releases_it(make_app, ui
     assert app.screen.get_at(area.center)[:3] != TORUS_FILL  # the 2D grid is back
 
 
+def test_every_v_draws_on_one_context_freed_when_the_app_closes(make_app, ui, fake_view):
+    """Each V made (and later destroyed) a context of its own, and the driver keeps part of
+    every destroyed context: memory and threads grew with each toggle (F32 follow-up)."""
+    app = make_app()
+    u = ui(app)
+    for _ in range(3):
+        _enter_3d(app, ui)
+        u.frame()
+        u.key(pygame.K_v, "v")
+        assert app.view_mode == "2D"
+    assert len(fake_view.instances) == 3 and all(v.released == 1 for v in fake_view.instances)
+    [context] = FakeContext.instances
+    assert all(view.ctx is context for view in fake_view.instances)
+    assert context.released == 0  # leaving 3D keeps it for the next V
+
+    app.close()
+    assert context.released == 1
+    app.close()  # closing twice frees it once
+    assert context.released == 1
+
+
 def test_apply_and_new_in_3d_reach_the_view(make_app, ui, fake_view):
     """F31: Apply kept a renderer built for the old grid size and species count."""
     app = make_app()
@@ -258,6 +304,12 @@ def test_a_failing_draw_returns_to_2d_with_the_reason(make_app, ui, fake_view):
     u.frame()  # does not raise
     assert app.view_mode == "2D" and app.torus_view is None and view.released == 1
     assert app.torus_status.startswith("3D view stopped: a 99999 x 3 grid")
+    # The failure may have broken the context: it is freed, and the next V makes a new one.
+    [broken] = FakeContext.instances
+    assert broken.released == 1
+    fake_view.fail_draw = None
+    assert _enter_3d(app, ui).ctx is not broken
+    assert len(FakeContext.instances) == 2
 
 
 def test_closing_the_app_releases_the_3d_view(make_app, ui, fake_view):
@@ -266,6 +318,7 @@ def test_closing_the_app_releases_the_3d_view(make_app, ui, fake_view):
     pygame.event.post(pygame.event.Event(pygame.QUIT))
     app.run()
     assert view.released == 1 and app.torus_view is None
+    assert [ctx.released for ctx in FakeContext.instances] == [1]
 
 
 # --- the real view on OpenGL ---------------------------------------------------------------------
@@ -341,3 +394,25 @@ def test_apply_resize_and_new_work_in_the_real_3d_view(real_3d, ui):
     u.key(pygame.K_n, "n")
     u.frame()
     assert app.view_mode == "3D", app.torus_status
+
+
+def test_the_real_3d_view_reuses_one_context_until_the_app_closes(real_3d, ui):
+    """A fresh EGL context per V grew memory and driver threads with every toggle; one
+    context now serves every 3D view, survives leaving 3D, and is freed by close()."""
+    moderngl = pytest.importorskip("moderngl", exc_type=ImportError)
+    app = real_3d()
+    u = ui(app)
+    context = app.torus_view.ctx
+    for _ in range(3):
+        u.frame()
+        u.key(pygame.K_v, "v")
+        assert app.view_mode == "2D"
+        with context:  # still usable between 3D sessions
+            context.buffer(b"\0" * 16).release()
+        u.key(pygame.K_v, "v")
+        assert app.view_mode == "3D", app.torus_status
+        assert app.torus_view.ctx is context
+
+    app.close()
+    assert app.torus_view is None
+    assert isinstance(context.mglo, moderngl.InvalidObject)
