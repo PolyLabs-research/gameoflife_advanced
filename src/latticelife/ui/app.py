@@ -19,7 +19,9 @@ holds it. An edit made while running holds the simulation for `EDIT_HOLD_SECONDS
 seen before the rule acts on it (legacy click parity).
 
 New (N) gives every current species a fresh random rule sized to the shape's neighbour count and
-re-seeds the grid; Reset (R) keeps the rules and re-seeds. The help overlay ('?' on any keyboard
+re-seeds the grid; Reset (R) keeps the rules and re-seeds. Reset, New and Apply keep a pause the
+user chose, so generation 0 can be inspected and single-stepped, and lift one a sudden-death
+alert imposed. The help overlay ('?' on any keyboard
 layout, or F1) is modal: while it is open, input does nothing else, and a click closes it.
 
 3D view (V, `[torus]` extra). The grid area shows the grid on a torus (`ui/torus/view.py`),
@@ -237,7 +239,9 @@ def _draw_population_chart(
     if len(records) < 2:
         return
     n = len(records)
-    max_v = max(session.history_alive) or 1
+    # The plotted generations' own totals: `history_alive` also holds the unplotted
+    # generation-0 total, which would squash every line under a crowded start.
+    max_v = max(record.grid_metrics.total_alive for record in records) or 1
 
     def to_points(values: list[int]) -> list[tuple[float, float]]:
         return [
@@ -387,9 +391,14 @@ class App:
     def _replace_session(
         self, config: Config, lifeforms: list[Lifeform], seed: int | None = None
     ) -> None:
+        # The run state carries over as in `SimulationSession.reset()` (F48): a pause the user
+        # chose is kept, so the new generation 0 can be inspected and single-stepped; one a
+        # sudden-death alert imposed belonged to the old run and is lifted.
+        old = self.session
+        paused = old.paused and not old.paused_by_alert
         self.config = config
         self.lifeforms = lifeforms
-        self.session = SimulationSession(config, lifeforms, seed=seed)
+        self.session = SimulationSession(config, lifeforms, seed=seed, paused=paused)
         self.palette = render.build_palette(lifeforms)
         if not 1 <= self.selected_species <= len(lifeforms):
             self.selected_species = 1

@@ -221,6 +221,26 @@ def test_key_repeat_is_on_only_while_a_field_has_focus(make_app, ui):
     assert pygame.key.get_repeat() == (0, 0)
 
 
+def test_the_population_chart_is_scaled_to_the_generations_it_plots(make_app, ui):
+    """`history_alive` also holds the seeded generation-0 total, which the chart does not plot;
+    scaling by it squashed every line under a crowded start that died off at generation 1."""
+    app = make_app(
+        grid={"shape": "square", "width": 50, "height": 50},
+        simulation={"n_lifeforms": 1, "initial_alive_percentage": 0.9, "seed": 7},
+    )
+    u = ui(app)
+    u.frame(6)  # generations 1-5: no full sudden-death window yet, so no banner over the chart
+    session = app.session
+    plotted = max(r.grid_metrics.total_alive for r in session.history_records)
+    assert session.history_alive[0] > 2 * plotted  # the precondition: a crowded start
+
+    chart = app.layout.chart_rect()
+    pixels = pygame.surfarray.array3d(app.screen.subsurface(chart))  # (x, y, rgb)
+    line = np.all(pixels == app.palette[1][:3], axis=-1)
+    top = int(np.flatnonzero(line.any(axis=0))[0])
+    assert top <= 6  # the peak sits at the chart's 4 px top margin (2 px line)
+
+
 def test_the_alert_card_stays_inside_its_card_and_the_full_message_is_shown(make_app, ui):
     """F47: the full alert message was drawn in the card, spilling past the panel."""
     app = make_app()

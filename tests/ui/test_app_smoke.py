@@ -47,6 +47,59 @@ def test_r_resets_and_the_frame_shows_generation_zero(make_app, ui):
     assert app.session.generation == 1
 
 
+def _restart(u, app, action: str) -> None:
+    """Reset (R), New (N) or Apply (the panel's button), as a person does them."""
+    if action == "reset":
+        u.key(pygame.K_r, "r")
+    elif action == "new":
+        u.key(pygame.K_n, "n")
+    else:
+        u.click(app.settings_panel.apply_button.rect.center)
+
+
+@pytest.mark.parametrize("action", ["reset", "new", "apply"])
+def test_a_paused_run_stays_paused_on_generation_zero_after_reset_new_and_apply(
+    make_app, ui, action
+):
+    """F48: Reset, New and Apply always unpaused, so a paused user could neither inspect nor
+    single-step generation 0."""
+    app = make_app()
+    u = ui(app)
+    u.frame(6)
+    u.key(pygame.K_SPACE, " ")
+    assert app.session.paused is True
+
+    _restart(u, app, action)
+    u.frame(3)
+
+    assert app.session.paused is True
+    assert app.session.generation == 0
+    u.key(pygame.K_s, "s")
+    assert app.session.generation == 1
+    assert app.session.paused is True
+
+
+@pytest.mark.parametrize("action", ["reset", "new", "apply"])
+def test_reset_new_and_apply_lift_a_pause_the_sudden_death_alert_imposed(make_app, ui, action):
+    """The auto-pause belongs to the run that crashed: like `SimulationSession.reset()`, New
+    and Apply start the next run going, while a pause the user chose is kept (above)."""
+    app = make_app()
+    u = ui(app)
+    u.frame()
+    session = app.session
+    for _ in range(session.config.alerts.sudden_death_window):
+        session.history_alive.append(10**6)
+    session.grid.occupancy[:] = 0
+    u.frame()
+    assert session.paused_by_alert is True
+
+    _restart(u, app, action)
+    assert app.session.paused is False
+    assert app.session.generation == 0  # drawn before any step
+    u.frame(2)
+    assert app.session.generation == 2
+
+
 def test_s_steps_once_only_when_paused(make_app, ui):
     app = make_app()
     app.session.paused = True
