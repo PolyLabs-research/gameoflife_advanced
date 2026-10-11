@@ -70,6 +70,8 @@ EDIT_HOLD_SECONDS = 0.25
 TEXT_KEY_REPEAT = (400, 35)
 # How long the 3D view's status message stays up.
 STATUS_SECONDS = 6.0
+# Half the space between the alert message and the 3D status when both share the status strip.
+STATUS_GAP = 8
 
 BACKGROUND_COLOR = (18, 18, 24)
 PANEL_BACKGROUND_COLOR = (24, 26, 32)
@@ -178,7 +180,8 @@ def _short_error(exc: BaseException) -> str:
 
 
 def _alert_label(alert: Alert | None) -> str:
-    """Short card label for an alert; the full message is drawn over the chart."""
+    """Short card label for an alert; the full message is drawn in the status strip, between
+    the chart and the grid."""
     if alert is None:
         return "None"
     return "Sudden death" if alert.kind is AlertKind.SUDDEN_DEATH else "Stasis"
@@ -256,16 +259,23 @@ def _draw_population_chart(
 
 
 def _draw_alert_banner(
-    surface: pygame.Surface, fonts: FontManager, rect: pygame.Rect, alert: Alert | None
+    surface: pygame.Surface,
+    fonts: FontManager,
+    strip: pygame.Rect,
+    alert: Alert | None,
+    max_width: int,
 ) -> None:
-    """The full alert message, across the top of the chart (the stat card only names it)."""
+    """The full alert message (the stat card only names it), at the left of `strip` — the
+    status strip between the chart and the grid — in a box at most `max_width` px wide. Drawn
+    over the chart instead, it hid the lines' early peaks for as long as the alert lasted."""
     if alert is None:
         return
     font = fonts.get("sm")
-    text = font.render(_fit_text(font, alert.message, rect.width - 32), True, ACCENT_DANGER)
-    text_rect = text.get_rect(topleft=(rect.x + 14, rect.y + 10))
-    pygame.draw.rect(surface, CHART_BACKGROUND, text_rect.inflate(12, 6), border_radius=4)
-    surface.blit(text, text_rect)
+    text = font.render(_fit_text(font, alert.message, max_width - 12), True, ACCENT_DANGER)
+    box = text.get_rect().inflate(12, 6)
+    box.midleft = strip.midleft
+    pygame.draw.rect(surface, CHART_BACKGROUND, box, border_radius=4)
+    surface.blit(text, text.get_rect(center=box.center))
 
 
 def _draw_keyboard_hints(
@@ -633,14 +643,16 @@ class App:
 
         chart_rect = self.layout.chart_rect()
         _draw_population_chart(self.screen, chart_rect, self.session, self.palette)
-        _draw_alert_banner(self.screen, self.fonts, chart_rect, self.session.alert)
 
         if self.torus_view is not None:
             self._draw_torus()
         else:
             self._draw_grid()
 
+        strip = self._status_strip()
         status = self._torus_status_text()
+        alert_width = strip.width if status is None else strip.width // 2 - STATUS_GAP
+        _draw_alert_banner(self.screen, self.fonts, strip, self.session.alert, alert_width)
         if status is not None:
             self.screen.blit(*status)
 
@@ -678,19 +690,26 @@ class App:
             self._leave_3d(f"3D view stopped: {_short_error(exc)}")
             self._draw_grid()
 
+    def _status_strip(self) -> pygame.Rect:
+        """The strip between the chart and the grid area, as wide as the chart. The alert
+        message and the 3D view's status are written here, so neither covers the chart's lines
+        or the grid's cells."""
+        chart = self.layout.chart_rect()
+        return pygame.Rect(chart.x, chart.bottom, chart.width, self.layout.grid_y - chart.bottom)
+
     def _torus_status_text(self) -> tuple[pygame.Surface, pygame.Rect] | None:
-        """The status message and where it goes: the strip between the chart and the grid area,
-        so it never covers cells or the chart."""
+        """The 3D view's status message and where it goes in the status strip: at its left, or
+        at the right of its right half while the alert message takes the left half."""
         if self.torus_status is None:
             return None
-        chart_rect = self.layout.chart_rect()
+        strip = self._status_strip()
         font = self.fonts.get("sm")
-        text = font.render(
-            _fit_text(font, self.torus_status, chart_rect.width), True, ACCENT_DANGER
-        )
-        strip_top = chart_rect.bottom
-        strip_height = self.layout.grid_y - strip_top
-        return text, text.get_rect(left=chart_rect.x, centery=strip_top + strip_height // 2)
+        if self.session.alert is None:
+            text = font.render(_fit_text(font, self.torus_status, strip.width), True, ACCENT_DANGER)
+            return text, text.get_rect(midleft=strip.midleft)
+        half = strip.width // 2 - STATUS_GAP
+        text = font.render(_fit_text(font, self.torus_status, half), True, ACCENT_DANGER)
+        return text, text.get_rect(midright=strip.midright)
 
     # --- main loop -------------------------------------------------------------
 

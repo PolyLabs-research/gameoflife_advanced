@@ -256,7 +256,33 @@ def test_the_alert_card_stays_inside_its_card_and_the_full_message_is_shown(make
 
     font = app.fonts.get("lg")
     assert font.size(app_module._fit_text(font, message, 100))[0] <= 100
-    chart = app.layout.chart_rect()
-    banner = pygame.surfarray.array3d(app.screen.subsurface(chart.x, chart.y, chart.w, 30))
+    strip = app._status_strip()  # the full message, between the chart and the grid
+    banner = pygame.surfarray.array3d(app.screen.subsurface(strip))
     red = np.all(np.abs(banner.astype(int) - app_module.ACCENT_DANGER) <= 40, axis=-1)
+    assert red.sum() > 50
+
+
+def test_the_alert_message_leaves_the_population_chart_uncovered(make_app, ui):
+    """The alert banner was drawn over the chart's top-left corner, where a crowded start's
+    early peak is plotted, hiding the lines for as long as the alert lasted."""
+    app = make_app(
+        grid={"shape": "square", "width": 50, "height": 50},
+        simulation={"n_lifeforms": 1, "initial_alive_percentage": 0.9, "seed": 7},
+    )
+    ui(app).frame(6)
+    app.session.paused = True
+    chart = app.layout.chart_rect()
+    app._draw()
+    before = pygame.surfarray.array3d(app.screen.subsurface(chart)).copy()
+    line = np.all(before == app.palette[1][:3], axis=-1)
+    assert line[8:160, 7:30].any()  # the precondition: the peak runs where the banner was
+
+    app.session.alert = Alert(AlertKind.SUDDEN_DEATH, "Sudden death: gen 1234 drop 12345->1")
+    app._draw()
+
+    assert np.array_equal(pygame.surfarray.array3d(app.screen.subsurface(chart)), before)
+    strip = app._status_strip()
+    assert chart.bottom <= strip.top and strip.bottom <= app.layout.grid_rect().top
+    shown = pygame.surfarray.array3d(app.screen.subsurface(strip))
+    red = np.all(np.abs(shown.astype(int) - app_module.ACCENT_DANGER) <= 40, axis=-1)
     assert red.sum() > 50

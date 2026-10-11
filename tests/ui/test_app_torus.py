@@ -17,7 +17,8 @@ import pytest
 
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
-from latticelife.ui.app import STATUS_SECONDS
+from latticelife.session.alerts import Alert, AlertKind
+from latticelife.ui.app import ACCENT_DANGER, STATUS_SECONDS
 from latticelife.ui.torus.camera import OrbitalCamera
 
 VIEW_MODULE = "latticelife.ui.torus.view"
@@ -121,6 +122,27 @@ def test_the_status_sits_between_the_chart_and_the_grid_and_expires(make_app, ui
     assert app.torus_status is not None
     u.frame(3)
     assert app.torus_status is None
+
+
+def test_the_status_and_an_alert_message_share_the_strip_side_by_side(make_app, ui, fake_view):
+    """The alert message moved off the chart into the status strip; with a 3D status up too,
+    the alert takes the left half and the status the right, neither over the other."""
+    fake_view.fail_init = RuntimeError("no OpenGL 3.3 context (egl: no device) " + "x" * 200)
+    app = make_app()
+    app.session.paused = True
+    u = ui(app)
+    u.key(pygame.K_v, "v")
+    app.session.alert = Alert(AlertKind.SUDDEN_DEATH, "Sudden death: gen 1234 drop 12345->1")
+    u.frame()
+
+    strip = app._status_strip()
+    _, rect = app._torus_status_text()
+    assert strip.contains(rect) and rect.left >= strip.centerx
+    shown = pygame.surfarray.array3d(app.screen.subsurface(strip))
+    red = np.all(np.abs(shown.astype(int) - ACCENT_DANGER) <= 40, axis=-1)
+    left_half = red[: rect.left - strip.left - 1]
+    assert left_half.sum() > 50  # the alert message, left of the status
+    assert red[rect.left - strip.left :].sum() > 50  # the status itself
 
 
 def test_reset_new_and_apply_clear_the_status(make_app, ui, fake_view):
