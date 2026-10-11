@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from latticelife.config import load_config
 from latticelife.core.lifeform import Lifeform
@@ -122,3 +123,143 @@ def test_reset_clears_history_and_state():
     assert len(session.history_records) == 0
     assert session.paused is False
     assert session.alert is None
+
+
+# --- auto_pause (F5) ---------------------------------------------------------------------------
+
+
+def _collapsing_session(**session_kwargs) -> SimulationSession:
+    """A session whose next step drops from 1000 alive (10 generations ago) to 0."""
+    config = _config(width=10, height=10, wrap=True, initial_alive_percentage=0.0, n_lifeforms=1)
+    session = SimulationSession(config, [Lifeform(1, CONWAY)], **session_kwargs)
+    for _ in range(10):
+        session.history_alive.append(1000)
+    session.grid.occupancy[:] = 0
+    return session
+
+
+def test_auto_pause_off_still_reports_the_alert_but_keeps_running():
+    session = _collapsing_session(auto_pause=False)
+
+    session.step()
+
+    assert session.alert is not None
+    assert session.alert.kind is AlertKind.SUDDEN_DEATH
+    assert session.history_records[-1].alert is session.alert
+    assert session.paused is False
+
+
+def test_run_without_auto_pause_records_every_planned_generation():
+    session = _collapsing_session(auto_pause=False)
+
+    session.run(25)
+
+    assert session.generation == 25
+    assert session.history_records[0].alert.kind is AlertKind.SUDDEN_DEATH
+    assert session.history_records[-1].cluster_metrics is not None
+
+
+def test_from_config_passes_auto_pause_through():
+    config = _config(width=10, height=10, wrap=True)
+    assert SimulationSession.from_config(config, auto_pause=False).auto_pause is False
+    assert SimulationSession.from_config(config).auto_pause is True
+
+
+def test_generation_that_auto_pauses_has_cluster_metrics():
+    """F5: run() stops at an auto-pause, so that generation is the run's last recorded one and
+    must carry cluster metrics (§6.6) even off the cluster stride."""
+    session = _collapsing_session()
+    assert session.config.metrics.cluster_stride > 1
+
+    session.run(50)
+
+    assert session.paused is True
+    assert session.generation == 1
+    assert session.history_records[-1].cluster_metrics is not None
+
+
+# --- manual cell edits (F80) -------------------------------------------------------------------
+
+GLIDER = [(1, 2), (2, 3), (3, 1), (3, 2), (3, 3)]
+
+
+def test_erasing_the_grid_and_drawing_is_not_a_sudden_death():
+    """F80 repro: 80 generations, erase every live cell, draw a glider, step. The old code
+    raised 'Sudden death: gen 81 drop 238->5' and re-paused for 9 more generations."""
+    config = _config()  # default 50x50 square, Conway, wrap
+    session = SimulationSession(config, [Lifeform(1, CONWAY)], seed=12345)
+    session.run(80)
+    assert session.paused is False
+    assert session.history_alive[-1] > 100
+
+    for index in np.flatnonzero(session.grid.occupancy):
+        session.set_cell(int(index), 0)
+    for r, c in GLIDER:
+        session.set_cell(r * session.grid.width + c, 1)
+
+    for _ in range(config.alerts.sudden_death_window + 5):
+        session.step()
+        assert session.alert is None or session.alert.kind is not AlertKind.SUDDEN_DEATH
+        assert session.paused is False
+
+
+def test_growth_rate_after_an_edit_measures_only_the_rule():
+    config = _config(n_lifeforms=2)
+    session = SimulationSession(config, [Lifeform(1, CONWAY), Lifeform(2, CONWAY)], seed=777)
+    session.run(60)
+
+    empty = np.flatnonzero(session.grid.occupancy == 0)[:150]
+    for index in empty:
+        assert session.set_cell(int(index), 1) is True
+    alive_after_edit = int(np.count_nonzero(session.grid.occupancy == 1))
+
+    session.step()
+
+    metrics = session.history_records[-1].lifeform_metrics[1]
+    expected = (metrics.alive - alive_after_edit) / alive_after_edit
+    assert metrics.growth_rate == pytest.approx(expected)
+
+
+def test_set_cell_updates_occupancy_and_lifespans():
+    config = _config(width=10, height=10, wrap=True, initial_alive_percentage=0.0, n_lifeforms=2)
+    session = SimulationSession(config, [Lifeform(1, CONWAY), Lifeform(2, CONWAY)])
+
+    assert session.set_cell(5, 2) is True
+    assert session.grid.occupancy[5] == 2
+    assert session.grid.lifespans[5] == 1
+    assert session.set_cell(5, 2) is False  # already that species: nothing changes
+
+    session.grid.lifespans[5] = 40
+    assert session.set_cell(5, 1) is True  # replacing a species starts a fresh lifespan
+    assert session.grid.lifespans[5] == 1
+
+    assert session.set_cell(5, 0) is True
+    assert session.grid.occupancy[5] == 0
+    assert session.grid.lifespans[5] == 0
+
+    with pytest.raises(IndexError):
+        session.set_cell(100, 1)
+    with pytest.raises(IndexError):
+        session.set_cell(-1, 1)
+    with pytest.raises(ValueError):
+        session.set_cell(3, 7)
+
+
+def test_sudden_death_detection_resumes_once_a_full_window_follows_an_edit():
+    config = _config(width=10, height=10, wrap=True, initial_alive_percentage=0.0, n_lifeforms=1)
+    session = SimulationSession(config, [Lifeform(1, CONWAY)])
+    block = [(4, 4), (4, 5), (5, 4), (5, 5)]  # still life: 4 alive every generation
+    for r, c in block:
+        session.set_cell(r * session.grid.width + c, 1)
+
+    window = config.alerts.sudden_death_window
+    for _ in range(window):
+        session.step()
+        assert session.alert is None
+
+    session.grid.occupancy[:] = 0  # a collapse the dynamics did (not a set_cell edit)
+    session.step()
+
+    assert session.alert is not None
+    assert session.alert.kind is AlertKind.SUDDEN_DEATH
+    assert session.paused is True
