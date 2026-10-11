@@ -1,3 +1,7 @@
+from dataclasses import replace
+
+import pytest
+
 from latticelife.config import AlertsConfig
 from latticelife.session.alerts import AlertKind, evaluate
 
@@ -65,3 +69,37 @@ def test_sudden_death_ignores_zero_prior_population():
     alert = evaluate(alive_history, current_alive, 0.0, 100.0, CONFIG, generation=10)
 
     assert alert is None
+
+
+# --- the threshold is inclusive (§6.7 "dropped ≥ sudden_death_drop"; F9) -------------------------
+
+
+def _sudden_death(previous: int, current: int, config: AlertsConfig = CONFIG):
+    """evaluate() with a steady `previous` population over the window and no stasis."""
+    history = [previous] * config.sudden_death_window
+    return evaluate(history, current, 0.1, 50.0, config, generation=20)
+
+
+@pytest.mark.parametrize(("previous", "current"), [(1000, 200), (100, 20), (10, 2), (5, 1)])
+def test_a_drop_of_exactly_the_threshold_fires(previous, current):
+    alert = _sudden_death(previous, current)
+    assert alert is not None
+    assert alert.kind is AlertKind.SUDDEN_DEATH
+
+
+def test_a_drop_just_under_the_threshold_does_not_fire():
+    assert _sudden_death(1000, 201) is None
+
+
+def test_total_extinction_fires_with_a_threshold_of_one():
+    config = replace(CONFIG, sudden_death_drop=1.0)
+    assert _sudden_death(1000, 0, config).kind is AlertKind.SUDDEN_DEATH
+    assert _sudden_death(1000, 1, config) is None
+
+
+def test_threshold_comparison_is_free_of_rounding_error():
+    """0.07 * 100 is 7.000000000000001 in floating point, so comparing the drop with the
+    product would miss an exact 7% drop; comparing the fraction does not."""
+    config = replace(CONFIG, sudden_death_drop=0.07)
+    assert _sudden_death(100, 93, config).kind is AlertKind.SUDDEN_DEATH
+    assert _sudden_death(100, 94, config) is None
