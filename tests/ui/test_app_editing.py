@@ -197,6 +197,38 @@ def test_number_keys_and_panel_colours_choose_the_species_a_click_places(make_ap
     assert grid.occupancy[b] == 1
 
 
+def test_number_keys_choose_the_species_by_the_digit_typed_on_any_layout(make_app, ui):
+    """F83 follow-up: on AZERTY the top-row digits are typed with Shift and the keys can report
+    the keycodes of &, é, \", ... so only the keypad chose a species there."""
+    app = _paused_empty(make_app, ui, simulation={"n_lifeforms": 10})
+    u = ui(app)
+    grid = app.session.grid
+    a = 3 * 50 + 3
+
+    u.key(pygame.K_QUOTEDBL, "3", pygame.KMOD_LSHIFT)  # AZERTY Shift + top-row 3
+    assert app.selected_species == 3 and app.settings_panel.selected_species == 3
+    u.click(_centre(app, a))
+    assert grid.occupancy[a] == 3
+
+    u.key(pygame.K_AMPERSAND, "1", pygame.KMOD_LSHIFT)  # AZERTY Shift + top-row 1
+    assert app.selected_species == 1
+    u.key(ord("à"), "0", pygame.KMOD_LSHIFT)  # AZERTY Shift + top-row 0: species 10
+    assert app.selected_species == 10
+
+    # No digit typed: the keycode decides (US Shift+2, AZERTY top-row 7 unshifted as SDL
+    # reports it, the keypad with Num Lock off).
+    u.key(pygame.K_2, "@", pygame.KMOD_LSHIFT)
+    assert app.selected_species == 2
+    u.key(pygame.K_7, "è")
+    assert app.selected_species == 7
+    u.key(pygame.K_KP5)
+    assert app.selected_species == 5
+
+    u.key(pygame.K_QUOTEDBL, "3", pygame.KMOD_LCTRL)  # Ctrl+3 is not a shortcut
+    u.key(pygame.K_SLASH, "/")  # a key with no digit chooses nothing
+    assert app.selected_species == 5
+
+
 def test_a_focused_field_does_not_swallow_a_grid_click(make_app, ui):
     """F72: the first click on the grid only blurred the focused field."""
     app = _paused_empty(make_app, ui)

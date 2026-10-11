@@ -98,6 +98,8 @@ SHORTCUTS = [
     ("? or F1", "Toggle this help"),
 ]
 
+# Number keys by keycode, for when no digit character came with the key (US-style Shift+1,
+# the keypad with Num Lock off); `App._species_key` reads the typed digit first.
 _SPECIES_KEYS = {
     **{getattr(pygame, f"K_{d}"): d or 10 for d in range(10)},
     **{getattr(pygame, f"K_KP{d}"): d or 10 for d in range(10)},
@@ -326,7 +328,8 @@ class App:
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         # Typed characters reach the settings fields as TEXTINPUT (keyboard layouts and input
-        # methods included), and '?' is recognised from its translated character on any layout.
+        # methods included), and '?' and the species digits are recognised from their translated
+        # characters on any layout.
         pygame.key.start_text_input()
 
         self.config = config
@@ -554,6 +557,17 @@ class App:
             return True
         return event.key == pygame.K_SLASH and bool(getattr(event, "mod", 0) & pygame.KMOD_SHIFT)
 
+    @staticmethod
+    def _species_key(event: pygame.event.Event) -> int | None:
+        """The species a number key chooses ('0' is species 10), or None for any other key. The
+        typed digit comes first, so layouts that type the top-row digits with Shift (AZERTY) work
+        too; the keycode covers keys that came with no digit (US-style Shift+1, the keypad with
+        Num Lock off)."""
+        char = getattr(event, "unicode", "")
+        if len(char) == 1 and "0" <= char <= "9":
+            return int(char) or 10
+        return _SPECIES_KEYS.get(event.key)
+
     def _handle_keydown(self, event: pygame.event.Event) -> bool:
         if self._is_help_key(event):
             self.hints_visible = not self.hints_visible
@@ -570,8 +584,8 @@ class App:
             self._step_once()
         elif event.key == pygame.K_v:
             self._toggle_view_mode()
-        elif event.key in _SPECIES_KEYS:
-            self._select_species(_SPECIES_KEYS[event.key])
+        elif (species := self._species_key(event)) is not None:
+            self._select_species(species)
         else:
             return False
         return True
