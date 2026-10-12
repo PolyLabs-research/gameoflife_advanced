@@ -409,6 +409,58 @@ def test_autorun_refuses_a_db_that_is_not_schema_v2(tmp_path, log_dir, capsys):
     assert db.read_bytes() == before
 
 
+def test_autorun_refuses_another_apps_db_that_also_uses_user_version_2(tmp_path, log_dir, capsys):
+    """It used to exit 0 after switching the file to WAL and adding the four v2 tables."""
+    db = tmp_path / "app.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);"
+        "INSERT INTO users VALUES (1, 'a'); PRAGMA user_version = 2;"
+    )
+    conn.close()
+    before = db.read_bytes()
+
+    assert _autorun(write_config(tmp_path), db) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert err.startswith("latticelife autorun: ") and err.count("\n") == 1
+    assert "not a LatticeLife schema v2 database (user_version=2, tables: users" in err
+    assert db.read_bytes() == before
+    assert not Path(f"{db}-wal").exists()
+
+
+def _a_directory(tmp_path):
+    (tmp_path / "adir").mkdir()
+    return tmp_path / "adir"
+
+
+def _under_a_file(tmp_path):
+    (tmp_path / "afile").write_text("x")
+    return tmp_path / "afile" / "run.db"
+
+
+@pytest.mark.parametrize(
+    ("make_db", "message"),
+    [
+        (_a_directory, "adir cannot be opened as a SQLite database (it is a directory)"),
+        (_under_a_file, "cannot create the folder for"),
+    ],
+    ids=["directory", "parent-is-a-file"],
+)
+def test_autorun_reports_a_db_path_it_cannot_open_in_one_line(
+    tmp_path, log_dir, capsys, make_db, message
+):
+    """A directory as --db escaped as sqlite3.OperationalError ('unable to open database file')
+    with a traceback and exit 1, a file in place of the DB's folder as FileExistsError."""
+    db = make_db(tmp_path)
+
+    assert _autorun(write_config(tmp_path), db) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert err.startswith("latticelife autorun: ") and err.count("\n") == 1
+    assert message in err and "Traceback" not in err
+    events = [event["event"] for event in _events(log_dir, "app")]
+    assert "invalid_input" in events and "unhandled_exception" not in events
+
+
 _AUTORUN_SCRIPT = textwrap.dedent(
     """
     import sys

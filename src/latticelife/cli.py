@@ -4,10 +4,11 @@ logged as an `unhandled_exception` JSONL event before it is re-raised (§6.15). 
 appears here, and only here in `src/`, for user-facing CLI output.
 
 Exit status: 0 success; 1 the discovery worker failed (crashed, did not stop, or another
-`discover` run holds the same lineage); 2 bad arguments, an invalid config, or a `--db` file
-that is not a LatticeLife schema v2 database (each reported in one line on stderr, no
-traceback); 130 an `autorun` interrupted by Ctrl+C, SIGTERM or SIGHUP, after everything
-recorded so far has been flushed (or a `discover` whose worker a second Ctrl+C had killed).
+`discover` run holds the same lineage); 2 bad arguments, an invalid config, or a `--db` path
+that is not a LatticeLife schema v2 database or cannot be opened at all (each reported in one
+line on stderr, no traceback); 130 an `autorun` interrupted by Ctrl+C, SIGTERM or SIGHUP, after
+everything recorded so far has been flushed (or a `discover` whose worker a second Ctrl+C had
+killed).
 
 `autorun` streams each generation to the Recorder the moment it is produced, so a session's
 recording never depends on the session's bounded history buffers, and it runs sessions with
@@ -43,7 +44,7 @@ from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
 from latticelife.discovery.worker import EXIT_LOCKED, STOP_SIGNALS, DiscoveryWorker
 from latticelife.logging import configure_logging, log_event, log_path
-from latticelife.recording.recorder import Recorder, RecorderSchemaError
+from latticelife.recording.recorder import Recorder, RecorderOpenError, RecorderSchemaError
 from latticelife.session.session import SimulationSession
 
 EXIT_OK = 0
@@ -195,7 +196,11 @@ def run_autorun(args: argparse.Namespace) -> dict:
     config = _load_config(args.config)
     _check_autorun_shapes(config, args.shape)
     db_path = args.db if args.db is not None else Path(config.recording.db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        detail = f"{exc.strerror}: {exc.filename}" if exc.strerror and exc.filename else exc
+        raise RecorderOpenError(f"cannot create the folder for {db_path} ({detail})") from None
 
     top_level_rng = random.Random(config.simulation.seed or None)
     summary: dict = {"sessions": 0, "generations": 0, "db_path": str(db_path)}
@@ -363,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
             return run_discover(args)
         run_ui(args)
         return EXIT_OK
-    except (ConfigError, RecorderSchemaError) as exc:
+    except (ConfigError, RecorderSchemaError, RecorderOpenError) as exc:
         log_event("app", level="error", event="invalid_input", command=args.command, error=str(exc))
         print(f"latticelife {args.command}: {exc}", file=sys.stderr)
         return EXIT_USAGE

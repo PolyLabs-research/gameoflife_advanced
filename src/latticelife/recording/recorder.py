@@ -6,9 +6,13 @@ legacy DB's lifespan-derived columns (D-1) and zero-filled metric columns (D-2) 
 
 Opening a file never modifies one that is not already ours: a new or empty file (`user_version`
 0 and no schema object of any kind) gets the v2 schema, `user_version = 2` and WAL; an existing
-schema v2 file is checked table by table; any other file (the legacy `species.db`, a later
-schema, one holding only views/indexes/triggers, not SQLite at all) raises
-`RecorderSchemaError` before a single PRAGMA or DDL statement is written to it.
+schema v2 file (`user_version` 2, at least one of the four v2 tables and no other table; views,
+indexes and triggers of the user's own are fine) is checked table by table; any other file (the
+legacy `species.db`, a later schema, another application's database that also uses
+`user_version` 2, one holding only views/indexes/triggers, not SQLite at all) raises
+`RecorderSchemaError` before a single PRAGMA or DDL statement is written to it. A path SQLite
+cannot open at all (a directory, a file without read permission, a new file in a folder that
+cannot be written) raises `RecorderOpenError`.
 
 `lifeform_meta.birth`/`survive` hold `core.rules.format_counts` text: the spec's compact digits
 (`'3'`, `'23'`) while every count is <= 9, comma-separated once one reaches 10 (`'2,10,12'`,
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import os
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -81,6 +86,11 @@ class RecorderSchemaError(ValueError):
     anything has been written to the file."""
 
 
+class RecorderOpenError(ValueError):
+    """SQLite cannot open the DB path at all: a directory, a file without read permission, a
+    new file in a folder that cannot be written."""
+
+
 @functools.cache
 def _schema_columns() -> dict[str, tuple[str, ...]]:
     """Column names of each v2 table, read from `_SCHEMA` itself so the check below can never
@@ -120,7 +130,14 @@ class Recorder:
         self._pending_life_rows = 0
 
     def __enter__(self) -> Recorder:
-        conn = sqlite3.connect(self.db_path)
+        try:
+            conn = sqlite3.connect(self.db_path)
+        except sqlite3.Error as exc:
+            # os.path.isdir, not Path.is_dir: it never raises (a folder we may not search).
+            reason = "it is a directory" if os.path.isdir(self.db_path) else str(exc)
+            raise RecorderOpenError(
+                f"{self.db_path} cannot be opened as a SQLite database ({reason})"
+            ) from None
         try:
             self._prepare_schema(conn)
         except BaseException:
@@ -172,11 +189,20 @@ class Recorder:
             conn.executescript(f"BEGIN; {_SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
             return
 
-        if version != SCHEMA_VERSION:
+        # user_version 2 alone does not make a file ours: other applications version their own
+        # schemas with it too. Ours holds at least one v2 table and no table of anyone else's.
+        v2_tables = set(_schema_columns())
+        foreign = sorted(tables - v2_tables)
+        if version != SCHEMA_VERSION or foreign or not tables & v2_tables:
             others = sorted(f"{kind} {name}" for kind, name in objects if kind != "table")
+            not_v2 = (  # which ones, when v2 tables and others are mixed
+                f"; not schema v{SCHEMA_VERSION} tables: {', '.join(foreign)}"
+                if version == SCHEMA_VERSION and foreign and tables & v2_tables
+                else ""
+            )
             raise RecorderSchemaError(
                 f"{self.db_path} is not a LatticeLife schema v{SCHEMA_VERSION} database "
-                f"(user_version={version}, tables: {', '.join(sorted(tables)) or 'none'}"
+                f"(user_version={version}, tables: {', '.join(sorted(tables)) or 'none'}{not_v2}"
                 f"{'; other objects: ' + ', '.join(others) if others else ''}); "
                 "refusing to modify it. Record into a new file instead (autorun --db)."
             )

@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -7,7 +8,7 @@ import pytest
 from latticelife.config import load_config
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule, parse_counts
-from latticelife.recording.recorder import Recorder, RecorderSchemaError
+from latticelife.recording.recorder import Recorder, RecorderOpenError, RecorderSchemaError
 from latticelife.session.metrics import ClusterMetrics, GridMetrics, LifeformMetrics
 from latticelife.session.session import GenerationRecord, SimulationSession
 
@@ -256,6 +257,108 @@ def test_v2_db_with_wrong_columns_is_refused(tmp_path):
     with pytest.raises(RecorderSchemaError, match="life_records"), Recorder(db_path):
         pass
     assert _db_state(db_path)[1] == ["life_records"]
+
+
+_V2_GENERATION_METRICS = """CREATE TABLE generation_metrics (
+  session_id TEXT, generation INTEGER, total_alive INTEGER, changed_cells INTEGER,
+  volatility REAL, entropy REAL, PRIMARY KEY (session_id, generation));"""
+
+
+@pytest.mark.parametrize(
+    ("ddl", "message"),
+    [
+        (
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);"
+            "INSERT INTO users VALUES (1, 'a');",
+            r"user_version=2, tables: users\b",
+        ),
+        (
+            f"{_V2_GENERATION_METRICS} CREATE TABLE users (id INTEGER PRIMARY KEY);",
+            r"tables: generation_metrics, users; not schema v2 tables: users\b",
+        ),
+        ("CREATE VIEW v AS SELECT 1 AS x;", r"user_version=2, tables: none; other objects: view v"),
+        ("", r"user_version=2, tables: none\)"),
+    ],
+    ids=["foreign-tables", "v2-and-foreign-tables", "view-only", "no-objects"],
+)
+def test_user_version_2_alone_does_not_make_a_db_ours(tmp_path, ddl, message):
+    """Another application's database versioned with user_version 2 (users table, no v2 table)
+    used to pass every check: it was switched to WAL and given the four LatticeLife tables."""
+    db_path = tmp_path / "foreign.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(f"{ddl} PRAGMA user_version = 2;")
+    conn.close()
+    before = _db_state(db_path)
+    before_bytes = db_path.read_bytes()
+
+    with pytest.raises(RecorderSchemaError, match=message), Recorder(db_path):
+        pass
+
+    assert db_path.read_bytes() == before_bytes
+    assert _db_state(db_path) == before
+    assert _journal_mode(db_path) == "delete"
+    assert not Path(f"{db_path}-wal").exists()
+
+
+def test_v2_db_with_the_users_own_index_view_and_statistics_is_still_ours(tmp_path):
+    """Only tables decide whose a file is: an index, a view or ANALYZE's sqlite_stat1 added to a
+    recording for analysis does not lock the user out of recording into it again."""
+    db_path = tmp_path / "test.db"
+    with Recorder(db_path) as recorder:
+        recorder.start_session("sess-1", _config(), [Lifeform(1, CONWAY)], 1, seed=1)
+        recorder.record_generation("sess-1", _record(1, [1]))
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        "CREATE INDEX by_lifeform ON life_records (lifeform);"
+        "CREATE VIEW alive_by_generation AS SELECT generation, total_alive FROM generation_metrics;"
+        "DROP TABLE lifeform_meta; ANALYZE;"
+    )
+    conn.close()
+
+    with Recorder(db_path) as recorder:
+        recorder.start_session("sess-2", _config(), [Lifeform(1, CONWAY)], 1, seed=1)
+        recorder.record_generation("sess-2", _record(1, [1]))
+
+    version, tables, rows = _db_state(db_path)
+    assert version == 2
+    assert {"session_metadata", "lifeform_meta", "generation_metrics", "life_records"} <= set(
+        tables
+    )
+    assert len(rows["generation_metrics"]) == 2
+    assert rows["lifeform_meta"] == [("sess-2", 1, "3", "23")]
+
+
+def test_a_path_sqlite_cannot_open_raises_recorder_open_error(tmp_path):
+    """A directory used to escape as sqlite3.OperationalError('unable to open database file')."""
+    folder = tmp_path / "recordings"
+    folder.mkdir()
+    with (
+        pytest.raises(RecorderOpenError, match="recordings cannot be opened.*is a directory"),
+        Recorder(folder),
+    ):
+        pass
+    assert list(folder.iterdir()) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_unreadable_db_and_unwritable_folder_raise_recorder_open_error(tmp_path):
+    unreadable = tmp_path / "locked.db"
+    with Recorder(unreadable):
+        pass
+    unreadable.chmod(0)
+    read_only_folder = tmp_path / "read-only"
+    read_only_folder.mkdir(mode=0o555)
+    try:
+        for db_path in (unreadable, read_only_folder / "new.db"):
+            with (
+                pytest.raises(RecorderOpenError, match="unable to open database file"),
+                Recorder(db_path),
+            ):
+                pass
+        assert list(read_only_folder.iterdir()) == []
+    finally:
+        unreadable.chmod(0o644)
+        read_only_folder.chmod(0o755)
 
 
 @pytest.mark.parametrize(
