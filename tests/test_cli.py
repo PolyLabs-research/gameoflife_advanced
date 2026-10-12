@@ -27,6 +27,13 @@ from latticelife.session.session import SimulationSession
 
 SRC_DIR = Path(latticelife.__file__).resolve().parents[1]
 
+
+def _python_env() -> dict[str, str]:
+    """The environment for a Python subprocess running this checkout's code. It keeps the
+    inherited PYTHONPATH after `src`: that carries the suite's out/ guard (tests/conftest.py)."""
+    return {**os.environ, "PYTHONPATH": os.pathsep.join([str(SRC_DIR), os.environ["PYTHONPATH"]])}
+
+
 # Small enough for sub-second sessions and discovery generations, valid for every shape.
 FAST = {
     "grid.width": 12,
@@ -421,7 +428,7 @@ def test_sigterm_flushes_autorun(tmp_path, log_dir):
     argv = ["autorun", "--sessions", "1", "--generations", "1000000", "--shape", "square"]
     proc = subprocess.Popen(
         [sys.executable, str(script), *argv, "--config", str(config), "--db", str(db)],
-        env={**os.environ, "PYTHONPATH": str(SRC_DIR)},
+        env=_python_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -512,6 +519,9 @@ def test_second_ctrl_c_kills_the_worker_at_once(
     try:
         status = cli.main(["discover", "--minutes", "5", "--config", str(config)])
     finally:
+        # A run that ended early (a broken worker) must not get the Ctrl+Cs still to come:
+        # pytest itself would take them and abort the whole session.
+        sender.kill()
         sender.wait(10)
     assert status == cli.EXIT_INTERRUPTED
     assert time.monotonic() - t0 < 10
@@ -538,7 +548,7 @@ def _start_discover(tmp_path, method, minutes="5"):
     argv = ["discover", "--minutes", minutes, "--config", str(write_config(tmp_path))]
     return subprocess.Popen(
         [sys.executable, str(script), method, *argv],
-        env={**os.environ, "PYTHONPATH": str(SRC_DIR)},
+        env=_python_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

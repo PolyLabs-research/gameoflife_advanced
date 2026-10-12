@@ -128,8 +128,10 @@ def test_installed_wheel_runs_from_any_directory(tmp_path):
     cwd.mkdir()
     data_home = tmp_path / "data"
     env = {key: value for key, value in os.environ.items() if key != LOG_DIR_ENV}
+    # The unpacked copy first; the inherited PYTHONPATH after it carries the suite's out/ guard
+    # (tests/conftest.py), and the runner below checks the copy is the one imported.
     env |= {
-        "PYTHONPATH": str(site),
+        "PYTHONPATH": os.pathsep.join([str(site), os.environ["PYTHONPATH"]]),
         "XDG_DATA_HOME": str(data_home),
         "HOME": str(tmp_path / "home"),
         "SDL_VIDEODRIVER": "dummy",

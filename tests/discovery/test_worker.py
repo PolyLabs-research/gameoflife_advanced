@@ -221,6 +221,32 @@ def test_worker_writes_rules_and_logs_where_the_config_says(tmp_path, monkeypatc
     assert not (tmp_path / "out").exists()
 
 
+def test_a_worker_writing_into_the_real_out_is_refused_not_obeyed(tmp_path, log_dir, guard_also):
+    """A test run once replaced the project's out/discovered_rules.jsonl with test rows (a
+    regression of F17 in the worker). The suite's out/ guard (tests/conftest.py) reaches the
+    worker: its write there is refused before it happens and the worker crashes. Here the guard
+    also watches a tmp stand-in for out/, which the config's rules file points into."""
+    out = tmp_path / "project" / "out"
+    out.mkdir(parents=True)
+    rules = out / "discovered_rules.jsonl"
+    rules.write_text("a row worth keeping\n")
+    guard_also(out)
+    config = _fast_config(tmp_path, save_threshold=1e-9, discovered_path=str(rules))
+    worker = DiscoveryWorker(config, shape="square")
+    worker.start()
+    try:
+        worker.join(timeout=30)
+    finally:
+        if worker.is_alive():  # it wrote somewhere unguarded and ran on
+            worker.kill()
+            worker.join(timeout=10)
+
+    assert worker.exitcode == 1
+    assert rules.read_text() == "a row worth keeping\n"
+    (crashed,) = [e for e in _events(log_dir) if e["event"] == "worker_crashed"]
+    assert "must not change the project's real out/" in crashed["error"]
+
+
 def test_real_worker_resumes_its_lineage(tmp_path, log_dir):
     """F63: the old test (gen2 >= gen1 after two 2 s runs) passed most of the time even with
     resume disabled. A crafted checkpoint at generation 1000 must be continued, not restarted."""
@@ -662,7 +688,9 @@ def test_worker_exits_when_its_parent_is_killed(tmp_path, log_dir):
     checkpoint and the rules file."""
     script = tmp_path / "orphan.py"
     script.write_text(_ORPHAN_SCRIPT)
-    env = {**os.environ, "PYTHONPATH": str(SRC_DIR)}
+    # The inherited PYTHONPATH carries the suite's out/ guard (tests/conftest.py).
+    pythonpath = os.pathsep.join([str(SRC_DIR), os.environ["PYTHONPATH"]])
+    env = {**os.environ, "PYTHONPATH": pythonpath}
     parent = subprocess.Popen(
         [sys.executable, str(script), str(DEFAULT_CONFIG_PATH), str(tmp_path)], env=env
     )
