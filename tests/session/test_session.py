@@ -424,6 +424,95 @@ def test_a_later_crash_after_the_alert_cleared_pauses_again():
     assert session.paused is True
 
 
+def _step_resuming(session: SimulationSession, generations: int) -> list[int]:
+    """Step like a user who presses Play after every auto-pause; the generations that paused."""
+    pauses = []
+    for _ in range(generations):
+        session.step()
+        if session.paused:
+            pauses.append(session.generation)
+            session.paused = False
+    return pauses
+
+
+def test_a_crash_that_leaves_an_oscillator_pauses_once():
+    """F8 follow-up: three beacons (period 2, 24 <-> 18 cells) left after a crash from 100 swing
+    across the 80% threshold, so the alert turned off and on every generation while the 100s
+    were in the window, and each re-raise paused again (generations 1, 3, 5, 7, 9)."""
+    config = _config(width=30, height=30, wrap=True, initial_alive_percentage=0.0, n_lifeforms=1)
+    session = SimulationSession(config, [Lifeform(1, CONWAY)])
+    session.history_alive.clear()
+    session.history_alive.extend([100] * config.alerts.sudden_death_window)
+    beacon = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 2), (2, 3), (3, 2), (3, 3)]
+    for r0, c0 in [(2, 2), (2, 12), (2, 22)]:  # placed as the dynamics left them, not edited
+        for r, c in beacon:
+            session.grid.occupancy[(r0 + r) * 30 + c0 + c] = 1
+
+    pauses = _step_resuming(session, 14)
+
+    assert pauses == [1]
+    kinds = [record.alert and record.alert.kind for record in session.history_records]
+    assert kinds[:10] == [AlertKind.SUDDEN_DEATH, None] * 5  # still reported each time
+    assert kinds[10:] == [None] * 4
+
+
+def test_a_further_collapse_pauses_once_its_drop_starts_after_the_reported_crash():
+    """A drop measured from a baseline after the reported crash is a new crash, even though
+    the alert has held since: it pauses a window after the first one, reported from there."""
+    config = _config(width=10, height=10, wrap=True, initial_alive_percentage=0.0, n_lifeforms=1)
+    session = SimulationSession(config, [Lifeform(1, CONWAY)])
+    window = config.alerts.sudden_death_window
+    session.history_alive.extend([1000] * window)
+    for r, c in [(4, 4), (4, 5), (5, 4), (5, 5)]:  # the crash leaves a still life of 4
+        session.grid.occupancy[r * 10 + c] = 1
+
+    assert _step_resuming(session, 5) == [1]
+    session.grid.occupancy[:] = 0  # the dynamics then wipe it out
+    assert _step_resuming(session, window) == [window + 1]
+
+    records = list(session.history_records)
+    assert all(record.alert.kind is AlertKind.SUDDEN_DEATH for record in records)
+    assert records[window].alert.message == f"Sudden death: gen {window + 1} drop 4->0"
+
+
+def _single_window_config():
+    config = _config(width=20, height=20, history_limit=1)
+    return replace(config, alerts=replace(config.alerts, sudden_death_window=1))
+
+
+def test_with_a_one_generation_window_a_crash_after_an_edit_pauses():
+    """With sudden_death_window = 1 the step after an edit is measured against the edited grid,
+    while the pre-edit alert still shows: that alert being up stopped the new crash pausing."""
+    config = _single_window_config()
+    session = SimulationSession(config, [Lifeform(1, Rule(birth=set(), survive=set()))], seed=3)
+    assert session.run(50) == 1
+    assert session.alert.message == "Sudden death: gen 1 drop 200->0"
+
+    session.paused = False
+    for i in range(5):
+        session.set_cell(i * 3, 1)
+    assert session.alert is not None  # the edit leaves the old alert showing
+
+    assert session.run(50) == 1
+    assert session.paused is True
+    assert session.alert.message == "Sudden death: gen 2 drop 5->0"
+
+
+@pytest.mark.parametrize("window", [1, 10])
+def test_reset_forgets_the_crash_reported_before_it(window):
+    """Generation numbers start again at reset, so an early crash in the new run pauses."""
+    config = _config(width=20, height=20)
+    config = replace(config, alerts=replace(config.alerts, sudden_death_window=window))
+    session = SimulationSession(config, [Lifeform(1, Rule(birth=set(), survive=set()))], seed=3)
+    assert session.run(50) == window
+
+    session.reset()
+
+    assert session.run(50) == window
+    assert session.paused_by_alert is True
+    assert session.alert.message == f"Sudden death: gen {window} drop 200->0"
+
+
 # --- pause ownership across reset and new sessions (F48) ----------------------------------------
 
 

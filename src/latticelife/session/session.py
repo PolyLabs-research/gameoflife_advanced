@@ -5,10 +5,15 @@ discovery evaluations) drive this one class. Zero pygame imports.
 Alerts are always evaluated and exposed (`alert`, and each record's `alert`); `auto_pause` only
 decides whether a sudden-death alert also pauses the session (§6.7). The interactive app keeps
 the default; headless batch runs pass `auto_pause=False` so every planned generation is recorded.
-The pause comes when a sudden-death alert is raised, not on every generation it stays raised:
-the condition compares against the population `sudden_death_window` generations back, so after
-a crash it holds for up to a window of generations, and pausing on each one made every resume
-advance a single generation. A later crash, after the alert has cleared, pauses again.
+Each crash pauses once. The condition compares against the population `sudden_death_window`
+generations back, so after a crash the pre-crash baselines stay in the window for a window of
+generations: the alert holds, or turns off and on again as a population left swinging across
+the threshold (a period-2 oscillator) crosses it, and pausing on each generation or each re-raise
+made every resume advance one or two generations. So a sudden-death alert reports a new crash,
+and may pause, only when the drop it measures starts at or after the generation of the last
+crash reported: its baseline is then a population from after that crash. A later crash pauses
+again, at least a window after the one before; restarting the window (an edit, a reset) forgets
+the crash reported before it, since every drop measured after the restart starts after it.
 
 `paused` belongs to whoever set it last. An auto-pause is marked (`paused_by_alert`) until
 anything else sets `paused`; `reset()` keeps a pause the user chose, so generation 0 can be
@@ -108,6 +113,9 @@ class SimulationSession:
         # `_alert_baseline` is the edited grid's total, the restarted window's generation 0.
         self._alert_horizon: int | None = None
         self._alert_baseline = 0
+        # The generation of the last sudden-death alert that reported a new crash, or None when
+        # none has since the window (re)started; see the module docstring.
+        self._reported_crash: int | None = None
 
         self.randomise_lifeforms()
         self._start_history()
@@ -213,8 +221,10 @@ class SimulationSession:
         compared against. The edited grid becomes the window's generation 0, as the seeded grid
         is for a new session: its total is taken when the next step starts, after every edit
         made in between, so a population edited down to cells that die in that step is reported
-        a full window later, and nothing earlier fires."""
+        a full window later, and nothing earlier fires. Any drop reported from now on is a new
+        crash, even while the alert from before the edit is still showing."""
         self._alert_horizon = 0
+        self._reported_crash = None
 
     def _alert_history(self) -> Sequence[int]:
         """The alive counts sudden death may compare against, oldest first."""
@@ -247,7 +257,6 @@ class SimulationSession:
             for lf in self.lifeforms
         }
 
-        previous_alert = self.alert
         alert = alerts_module.evaluate(
             self._alert_history(),
             total_alive,
@@ -257,12 +266,17 @@ class SimulationSession:
             self.generation,
         )
         self.alert = alert
-        raised = (
+        # A new crash: the drop this alert measures (from `sudden_death_window` generations
+        # back) starts at or after the last crash reported, so it does not re-measure that one.
+        window_start = self.generation - self.config.alerts.sudden_death_window
+        new_crash = (
             alert is not None
             and alert.kind is AlertKind.SUDDEN_DEATH
-            and (previous_alert is None or previous_alert.kind is not AlertKind.SUDDEN_DEATH)
+            and (self._reported_crash is None or window_start >= self._reported_crash)
         )
-        pausing = self.auto_pause and raised and not self._paused
+        if new_crash:
+            self._reported_crash = self.generation
+        pausing = self.auto_pause and new_crash and not self._paused
         if pausing:
             self._paused = True
             self._paused_by_alert = True
