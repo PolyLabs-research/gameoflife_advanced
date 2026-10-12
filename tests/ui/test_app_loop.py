@@ -1,6 +1,7 @@
 """Frame timing, speed control, keyboard handling and New, driven through the real App."""
 
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pygame
@@ -144,18 +145,28 @@ def test_a_nonzero_seed_makes_new_and_r_reproducible(make_app, ui):
 
 @pytest.mark.parametrize(
     ("key", "unicode"),
-    [(223, "?"), (pygame.K_COMMA, "?"), (pygame.K_QUOTE, "?"), (pygame.K_PLUS, "?")],
+    [
+        (223, "?"),
+        (pygame.K_COMMA, "?"),
+        (pygame.K_QUOTE, "?"),
+        (pygame.K_PLUS, "?"),
+        (pygame.K_SLASH, "/"),  # US Shift+/ as SDL 2 reports it with text entry off
+        (pygame.K_SLASH, ""),
+    ],
 )
-def test_question_mark_opens_help_on_any_keyboard_layout(make_app, ui, key, unicode):
-    """F73: only the US Shift+/ key opened help; German, French, Spanish and Swedish layouts
-    put '?' elsewhere."""
+def test_question_mark_opens_help_whenever_the_key_carries_it(make_app, ui, key, unicode):
+    """F73: only the US Shift+/ key opened help, even when the key came with '?' (German,
+    French, Spanish and Swedish layouts put '?' elsewhere). With no field focused text entry is
+    off (F75), and SDL 2 then sends a key's keycode character rather than the shifted one, so
+    on those layouts F1 is the help key everywhere; the footer names it."""
     app = make_app()
     ui(app).key(key, unicode, pygame.KMOD_LSHIFT)
     assert app.hints_visible
 
 
-def test_f1_opens_help_too(make_app, ui):
+def test_f1_opens_help_too_and_the_footer_says_so(make_app, ui):
     app = make_app()
+    assert "F1" in app._footer_hint()
     ui(app).key(pygame.K_F1)
     assert app.hints_visible
 
@@ -219,6 +230,99 @@ def test_key_repeat_is_on_only_while_a_field_has_focus(make_app, ui):
     assert pygame.key.get_repeat() == app_module.TEXT_KEY_REPEAT
     u.key(pygame.K_RETURN, "\r")
     assert pygame.key.get_repeat() == (0, 0)
+
+
+@pytest.fixture
+def text_entry(monkeypatch):
+    """Records what the app asks of SDL text entry (each call still goes through): `on` is the
+    state — SDL starts with it on — `starts` the start calls, `rects` the input-method boxes."""
+    log = SimpleNamespace(on=True, starts=0, rects=[])
+    start = pygame.key.start_text_input
+    stop = pygame.key.stop_text_input
+    set_rect = pygame.key.set_text_input_rect
+
+    def start_text_input():
+        log.on = True
+        log.starts += 1
+        start()
+
+    def stop_text_input():
+        log.on = False
+        stop()
+
+    def set_text_input_rect(rect):
+        log.rects.append(pygame.Rect(rect))
+        set_rect(rect)
+
+    monkeypatch.setattr(pygame.key, "start_text_input", start_text_input)
+    monkeypatch.setattr(pygame.key, "stop_text_input", stop_text_input)
+    monkeypatch.setattr(pygame.key, "set_text_input_rect", set_text_input_rect)
+    return log
+
+
+def test_text_entry_is_on_only_while_a_field_has_focus(make_app, ui, text_entry):
+    """F75: SDL text entry stayed on with no field focused, so an input method could take
+    Space, N, R, S, V and the digits into a composition instead of the shortcuts."""
+    app = make_app(simulation={"n_lifeforms": 10})
+    u = ui(app)
+    u.frame()
+    panel = app.settings_panel
+    assert not text_entry.on
+
+    birth, survive = panel.rule_inputs[5]
+    u.click(birth.rect.center)
+    assert text_entry.on and text_entry.rects[-1] == birth.rect
+    u.click(survive.rect.center)  # one click blurs a field and focuses the next
+    assert text_entry.on and text_entry.rects[-1] == survive.rect
+    assert text_entry.starts == 1  # never restarted: that resets the input method
+    u.key(pygame.K_RETURN, "\r")
+    assert not text_entry.on
+
+    u.click(panel.width_input.rect.center)
+    assert text_entry.on and text_entry.rects[-1] == panel.width_input.rect
+    u.key(pygame.K_ESCAPE, "\x1b")
+    assert not text_entry.on
+
+    u.click(panel.height_input.rect.center)
+    assert text_entry.on
+    u.click(app.layout.grid_rect().center)
+    assert not text_entry.on
+
+    # Blurred while drawing (a smaller window squeezes the field out of view): off that frame.
+    u.click(birth.rect.center)
+    assert text_entry.on
+    pygame.event.post(pygame.event.Event(pygame.VIDEORESIZE, w=1200, h=500, size=(1200, 500)))
+    u.frame()
+    assert not birth.active and not text_entry.on
+    assert text_entry.starts == 4
+
+    session = app.session
+    u.key(pygame.K_n, "n")
+    assert app.session is not session
+
+
+def test_an_input_method_composition_shows_in_the_field_until_committed(make_app, ui):
+    """F75: TEXTEDITING (an input method's uncommitted text) never reached the fields."""
+    app = make_app()
+    u = ui(app)
+    u.frame()
+    birth = app.settings_panel.rule_inputs[0][0]
+    u.click(birth.rect.center)
+
+    u.compose("8")
+    assert (birth.text, birth.composition) == ("3", "8")
+    u.type("8")  # the commit
+    assert (birth.text, birth.composition) == ("38", "")
+    u.compose(",1")
+    u.compose("")  # cancelled
+    assert (birth.text, birth.composition) == ("38", "")
+    u.compose(",2")
+    u.key(pygame.K_ESCAPE, "\x1b")
+    assert (birth.text, birth.composition, birth.active) == ("3", "", False)
+
+    session = app.session
+    u.compose("n")  # no field focused: nothing to show it in, and no shortcut
+    assert birth.composition == "" and app.session is session
 
 
 def test_the_population_chart_is_scaled_to_the_generations_it_plots(make_app, ui):

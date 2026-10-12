@@ -9,6 +9,9 @@ commits and blurs it, but returns False, so the same click goes on to whatever i
 button, a grid cell). Typed characters come from `pygame.TEXTINPUT`, never from `KEYDOWN.unicode`:
 that is the only event an input method or on-screen keyboard delivers, and reading both would
 type every character twice. `KEYDOWN` handles the editing keys only (Backspace, Enter, Esc).
+While an input method composes, `pygame.TEXTEDITING` carries its uncommitted text: the focused
+field shows it underlined after its own text, and types nothing until the TEXTINPUT that commits
+it. (The app turns SDL text entry on only while a field has focus — see `App._sync_text_entry`.)
 
 Every widget draws inside the rect it is given: text that does not fit is clipped, and a focused
 field scrolls so its end (where typing happens) stays visible.
@@ -83,13 +86,17 @@ class Button:
 class _FocusableInput:
     """Shared focus/blur/edit handling for `TextInput` and `NumericInput`: click to focus, click
     elsewhere or Enter to commit and blur, Esc to blur and restore the text from before focus.
-    `invalid` (set by the owner, e.g. a failed Apply) outlines the field in red. Subclasses
-    provide `text`, `active`, `invalid`, `rect`, `_accepts(ch)` and `_commit_text()`."""
+    `invalid` (set by the owner, e.g. a failed Apply) outlines the field in red. `composition`
+    is an input method's uncommitted text, shown but not part of `text`. Subclasses provide
+    `text`, `font`, `active`, `invalid`, `rect`, `composition`, `_accepts(ch)` and
+    `_commit_text()`."""
 
     text: str
+    font: pygame.font.Font
     active: bool
     invalid: bool
     rect: pygame.Rect | None
+    composition: str
     _text_at_focus: str
 
     def _accepts(self, ch: str) -> bool:
@@ -102,12 +109,15 @@ class _FocusableInput:
         if not self.active:
             self.active = True
             self._text_at_focus = self.text
+            self.composition = ""
 
     def blur(self, commit: bool = True) -> None:
-        """Lose focus. `commit=False` (Esc) puts back the text the field had when focused."""
+        """Lose focus. `commit=False` (Esc) puts back the text the field had when focused. An
+        uncommitted composition is dropped (stopping text entry cancels it too)."""
         if not self.active:
             return
         self.active = False
+        self.composition = ""
         if commit:
             self._commit_text()
         else:
@@ -127,7 +137,12 @@ class _FocusableInput:
             return False
         if not self.active:
             return False
+        if event.type == pygame.TEXTEDITING:
+            # The whole composition so far ("" once it is committed or cancelled).
+            self.composition = event.text
+            return True
         if event.type == pygame.TEXTINPUT:
+            self.composition = ""
             self.text += "".join(ch for ch in event.text if ch.isprintable() and self._accepts(ch))
             return True
         if event.type == pygame.KEYDOWN:
@@ -157,21 +172,29 @@ class _FocusableInput:
         label: pygame.Surface,
         centered: bool,
     ) -> None:
-        """Blit `label` inside `rect`, clipped to it. A focused field that overflows shows its
-        end, with a caret after the text."""
+        """Blit `label` inside `rect`, clipped to it, and any input-method composition after it,
+        underlined. A focused field that overflows shows its end, with a caret after the text
+        (and composition)."""
         inner = rect.inflate(-2 * TEXT_PADDING, -4)
         text_width = label.get_width() if self.text else 0
-        if text_width > inner.width - 2:
-            x = inner.right - 2 - text_width if self.active else inner.x
-        elif centered and self.text:
-            x = rect.centerx - text_width // 2
+        preedit = self.font.render(self.composition, True, TEXT_COLOR) if self.composition else None
+        shown_width = text_width + (preedit.get_width() if preedit is not None else 0)
+        if shown_width > inner.width - 2:
+            x = inner.right - 2 - shown_width if self.active else inner.x
+        elif centered and shown_width:
+            x = rect.centerx - shown_width // 2
         else:
             x = inner.x
         y = rect.centery - label.get_height() // 2
+        half = label.get_height() // 2
         blit_clipped(surface, label, (x, y), inner)
+        if preedit is not None:
+            left = x + text_width
+            blit_clipped(surface, preedit, (left, y), inner)
+            underline = pygame.Rect(left, rect.centery + half, preedit.get_width(), 1)
+            pygame.draw.rect(surface, TEXT_COLOR, underline.clip(inner))
         if self.active:
-            caret_x = min(x + text_width + 1, inner.right - 1)
-            half = label.get_height() // 2
+            caret_x = min(x + shown_width + 1, inner.right - 1)
             pygame.draw.line(
                 surface, TEXT_COLOR, (caret_x, rect.centery - half), (caret_x, rect.centery + half)
             )
@@ -188,6 +211,7 @@ class TextInput(_FocusableInput):
     active: bool = field(default=False, init=False)
     invalid: bool = field(default=False, init=False)
     rect: pygame.Rect | None = field(default=None, init=False)
+    composition: str = field(default="", init=False)
     _text_at_focus: str = field(default="", init=False, repr=False)
 
     def _accepts(self, ch: str) -> bool:
@@ -200,7 +224,7 @@ class TextInput(_FocusableInput):
     def draw(self, surface: pygame.Surface, rect: pygame.Rect) -> None:
         self.rect = rect
         self._draw_box(surface, rect, radius=4)
-        if self.text:
+        if self.text or self.composition:
             label = self.font.render(self.text, True, TEXT_COLOR)
         else:
             label = self.font.render(self.placeholder, True, PLACEHOLDER_COLOR)
@@ -218,6 +242,7 @@ class NumericInput(_FocusableInput):
     active: bool = field(default=False, init=False)
     invalid: bool = field(default=False, init=False)
     rect: pygame.Rect | None = field(default=None, init=False)
+    composition: str = field(default="", init=False)
     _text_at_focus: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:

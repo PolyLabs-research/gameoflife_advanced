@@ -433,7 +433,7 @@ class SettingsPanel:
             return self._handle_wheel(event)
         if event.type in (pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP, pygame.WINDOWFOCUSLOST):
             return self.fps_slider.handle_event(event)
-        if event.type in (pygame.KEYDOWN, pygame.TEXTINPUT):
+        if event.type in (pygame.KEYDOWN, pygame.TEXTINPUT, pygame.TEXTEDITING):
             if self.shape_dropdown.active and self.shape_dropdown.handle_event(event):
                 return True
             focused = self._focused_inputs()

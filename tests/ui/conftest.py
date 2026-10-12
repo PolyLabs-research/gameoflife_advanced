@@ -67,6 +67,13 @@ class UI:
         pygame.event.post(pygame.event.Event(pygame.TEXTINPUT, text=text))
         self.frame()
 
+    def compose(self, text: str) -> None:
+        """An input method's uncommitted text so far, as TEXTEDITING ("" ends the composition)."""
+        pygame.event.post(
+            pygame.event.Event(pygame.TEXTEDITING, text=text, start=len(text), length=0)
+        )
+        self.frame()
+
     def clear_field(self, n: int = 10) -> None:
         for _ in range(n):
             pygame.event.post(

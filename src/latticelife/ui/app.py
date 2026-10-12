@@ -21,8 +21,17 @@ seen before the rule acts on it (legacy click parity).
 New (N) gives every current species a fresh random rule sized to the shape's neighbour count and
 re-seeds the grid; Reset (R) keeps the rules and re-seeds. Reset, New and Apply keep a pause the
 user chose, so generation 0 can be inspected and single-stepped, and lift one a sudden-death
-alert imposed. The help overlay ('?' on any keyboard
-layout, or F1) is modal: while it is open, input does nothing else, and a click closes it.
+alert imposed. The help overlay ('?', or F1 on any keyboard layout) is modal: while it is open,
+input does nothing else, and a click closes it.
+
+Keyboard. SDL text entry is on only while a settings field has focus (`_sync_text_entry`): the
+field then gets typed text, input-method compositions and the on-screen keyboard, and keys repeat.
+With no field focused the keys go straight to the shortcuts, so an input method can never take
+Space, N, R, S, V or a digit into a composition. SDL 2 then gives a key only the character its
+keycode names, not the one the layout types with Shift: the number keys still choose species (the
+top row has digit keycodes on AZERTY too), and '?' is recognised from that character or as
+US-style Shift+/ — on layouts that put '?' elsewhere (German, French, ...) F1 opens the help, and
+the footer says so.
 
 3D view (V, `[torus]` extra). The grid area shows the grid on a torus (`ui/torus/view.py`),
 rendered offscreen and blitted, so the window stays a normal pygame surface and the panel, chart
@@ -102,6 +111,8 @@ SHORTCUTS = [
     ("Wheel", "Scroll the settings panel"),
     ("? or F1", "Toggle this help"),
 ]
+# The footer's pointer to the help. F1 is named too: it is the help key on every layout.
+HELP_HINT = "Press ? or F1 for shortcuts"
 
 # Number keys by keycode, for when no digit character came with the key (US-style Shift+1,
 # the keypad with Num Lock off); `App._species_key` reads the typed digit first.
@@ -291,7 +302,7 @@ def _draw_keyboard_hints(
     visible: bool,
     window_width: int,
     window_height: int,
-    footer: str = "Press ? for shortcuts",
+    footer: str = HELP_HINT,
 ) -> None:
     if not visible:
         hint = fonts.get("xs").render(footer, True, CHART_AXIS_COLOR)
@@ -331,10 +342,9 @@ class App:
         pygame.display.set_caption("LatticeLife")
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
-        # Typed characters reach the settings fields as TEXTINPUT (keyboard layouts and input
-        # methods included), and '?' and the species digits are recognised from their translated
-        # characters on any layout.
-        pygame.key.start_text_input()
+        # SDL starts with text entry on; it is on only while a settings field has focus
+        # (`_sync_text_entry`), so an input method cannot capture the shortcut keys.
+        pygame.key.stop_text_input()
 
         self.config = config
         # Random rules for New and the panel's R buttons (reproducible from a nonzero seed).
@@ -369,7 +379,8 @@ class App:
         self._sim_time = 0.0
         self._frame_seconds = 0.0
         self._edit_hold = 0.0
-        self._key_repeat_on = False
+        # Whether text entry (with key repeat) is on, and the input-method box last set.
+        self._text_entry_on = False
         self._text_input_rect: pygame.Rect | None = None
 
         self.settings_panel = SettingsPanel(
@@ -577,7 +588,6 @@ class App:
                 if grid_rect.collidepoint(event.pos):
                     self._toggle_cell(event.pos)
 
-        self._sync_text_entry()
         return True
 
     def _handle_help_event(self, event: pygame.event.Event) -> bool:
@@ -591,12 +601,17 @@ class App:
             if event.button == 1:
                 self.hints_visible = False
             return True
-        return event.type in (pygame.MOUSEMOTION, pygame.MOUSEWHEEL, pygame.TEXTINPUT)
+        return event.type in (
+            pygame.MOUSEMOTION,
+            pygame.MOUSEWHEEL,
+            pygame.TEXTINPUT,
+            pygame.TEXTEDITING,
+        )
 
     @staticmethod
     def _is_help_key(event: pygame.event.Event) -> bool:
-        """'?' by its typed character (any keyboard layout), US-style Shift+/ when no character
-        came with the key, or F1."""
+        """'?' by the character that came with the key, US-style Shift+/ (with text entry off,
+        that key comes as '/'), or F1 on any layout (see the module docstring)."""
         if getattr(event, "unicode", "") == "?" or event.key == pygame.K_F1:
             return True
         return event.key == pygame.K_SLASH and bool(getattr(event, "mod", 0) & pygame.KMOD_SHIFT)
@@ -604,9 +619,10 @@ class App:
     @staticmethod
     def _species_key(event: pygame.event.Event) -> int | None:
         """The species a number key chooses ('0' is species 10), or None for any other key. The
-        typed digit comes first, so layouts that type the top-row digits with Shift (AZERTY) work
-        too; the keycode covers keys that came with no digit (US-style Shift+1, the keypad with
-        Num Lock off)."""
+        digit that came with the key comes first, so layouts that type the top-row digits with
+        Shift (AZERTY) work too; the keycode covers keys that came with no digit (US-style
+        Shift+1, the keypad with Num Lock off). With text entry off, SDL 2 gives AZERTY's top
+        row the digit keycodes, and the key its keycode's character."""
         char = getattr(event, "unicode", "")
         if len(char) == 1 and "0" <= char <= "9":
             return int(char) or 10
@@ -635,20 +651,31 @@ class App:
         return True
 
     def _sync_text_entry(self) -> None:
-        """Key repeat only while a settings field has focus (held Backspace deletes, but held
-        Space/N/R never repeat a shortcut), and the input-method box beside that field."""
+        """Text entry and key repeat on exactly while a settings field has focus, with the
+        input-method box beside that field. Run once a frame, after drawing, it follows every
+        way a field gains or loses focus — a click (one that moves focus between fields keeps
+        text entry on), Enter, Esc, or a scroll, smaller window or collapsed section that takes
+        the field out of view — from the panel's state.
+
+        On: SDL sends typed text as TEXTINPUT, compositions as TEXTEDITING, shows any on-screen
+        keyboard, and held Backspace repeats. Off: an input method cannot take the shortcut keys
+        into a composition, the on-screen keyboard hides, and held Space/N/R never repeat a
+        shortcut. Starting text entry again resets an input method, so it is only switched when
+        focus comes or goes."""
         panel = self.settings_panel
         focused = panel.has_focus()
-        if focused != self._key_repeat_on:
+        rect = panel.focused_rect() if focused else None
+        if rect is not None and (rect != self._text_input_rect or not self._text_entry_on):
+            pygame.key.set_text_input_rect(rect)  # before starting, so the box opens there
+        self._text_input_rect = rect
+        if focused != self._text_entry_on:
             if focused:
                 pygame.key.set_repeat(*TEXT_KEY_REPEAT)
+                pygame.key.start_text_input()
             else:
                 pygame.key.set_repeat()
-            self._key_repeat_on = focused
-        rect = panel.focused_rect()
-        if rect is not None and rect != self._text_input_rect:
-            pygame.key.set_text_input_rect(rect)
-        self._text_input_rect = rect
+                pygame.key.stop_text_input()
+            self._text_entry_on = focused
 
     def _grid_layout(self) -> render.GridLayout:
         grid = self.session.grid
@@ -668,10 +695,10 @@ class App:
 
     def _footer_hint(self) -> str:
         if self.torus_view is not None:
-            return "Drag to rotate · wheel to zoom · V for 2D   ·   Press ? for shortcuts"
+            return f"Drag to rotate · wheel to zoom · V for 2D   ·   {HELP_HINT}"
         if len(self.lifeforms) > 1:
-            return f"Clicks place species {self.selected_species}   ·   Press ? for shortcuts"
-        return "Press ? for shortcuts"
+            return f"Clicks place species {self.selected_species}   ·   {HELP_HINT}"
+        return HELP_HINT
 
     def _draw(self) -> None:
         self.screen.fill(BACKGROUND_COLOR)
@@ -808,6 +835,7 @@ class App:
         if running:
             self._advance_simulation(self._frame_seconds)
         self._draw()
+        self._sync_text_entry()  # after drawing, which can blur or move the focused field
         pygame.display.flip()
         self._frame_seconds = min(self.clock.tick(UI_FPS) / 1000.0, MAX_FRAME_SECONDS)
         if self.torus_status is not None:

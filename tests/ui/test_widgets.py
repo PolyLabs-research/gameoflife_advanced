@@ -94,6 +94,56 @@ def test_allowed_chars_filter_typed_text(font):
     assert field.text == "23, 4"
 
 
+def _editing(text):
+    return pygame.event.Event(pygame.TEXTEDITING, text=text, start=len(text), length=0)
+
+
+def _drawn(field, rect):
+    surface = pygame.Surface((300, 100))
+    surface.fill((1, 2, 3))
+    field.draw(surface, rect)
+    return pygame.surfarray.array3d(surface)
+
+
+def test_a_composition_is_drawn_underlined_and_typed_only_when_committed(font):
+    """F75: an input method's uncommitted text (TEXTEDITING) was never shown."""
+    rect = pygame.Rect(10, 10, 120, 28)
+    composing = TextInput("", font, placeholder="birth")
+    composing.draw(pygame.Surface((300, 100)), rect)
+    composing.handle_event(_down(rect.center))
+    assert composing.handle_event(_editing("12")) is True
+    assert (composing.text, composing.composition) == ("", "12")
+
+    # Drawn exactly as the typed text would be (no placeholder, same caret), plus one
+    # underline row under the composition.
+    typed = TextInput("12", font)
+    typed.draw(pygame.Surface((300, 100)), rect)
+    typed.handle_event(_down(rect.center))
+    changed = np.any(_drawn(composing, rect) != _drawn(typed, rect), axis=-1)  # (x, y)
+    rows = np.flatnonzero(changed.any(axis=0))
+    columns = np.flatnonzero(changed.any(axis=1))
+    assert len(rows) == 1 and rect.centery < rows[0] < rect.bottom
+    assert len(columns) == font.size("12")[0]
+
+    composing.handle_event(_text("12"))  # the commit
+    assert (composing.text, composing.composition) == ("12", "")
+    composing.handle_event(_editing("3"))
+    composing.handle_event(_editing(""))  # cancelled
+    assert (composing.text, composing.composition) == ("12", "")
+    composing.handle_event(_editing("4"))
+    composing.handle_event(_down((250, 80)))  # a blur drops it
+    assert (composing.text, composing.composition, composing.active) == ("12", "", False)
+    assert composing.handle_event(_editing("5")) is False  # unfocused: not for this field
+    assert composing.composition == ""
+
+    number = NumericInput(50, 5, 500, font)
+    number.draw(pygame.Surface((300, 100)), rect)
+    number.handle_event(_down(rect.center))
+    number.handle_event(_editing("８０"))
+    number.handle_event(_text("８０"))  # full-width digits commit as nothing (ASCII only)
+    assert (number.text, number.composition) == ("50", "")
+
+
 def test_long_text_is_clipped_to_its_box(font):
     """F53: a long rule drew under the R button and past the panel edge."""
     surface = pygame.Surface((300, 60))
