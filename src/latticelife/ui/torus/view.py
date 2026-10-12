@@ -19,7 +19,10 @@ every toggle.
 
 Contexts. moderngl draws with whichever context is current on the thread, so each public method
 makes the view's context current for its whole body (`with self.ctx:`) — once, never nested:
-leaving that block can leave no context current at all (moderngl's EGL backend does).
+leaving that block can leave no context current at all (moderngl's EGL backend does). Creating a
+context also makes it current on the creating thread. Either would displace a GL context SDL
+keeps current on the main thread to present the window, so the app makes, uses and releases
+its context and views on a thread of their own (`App._on_gl_thread`).
 """
 
 from __future__ import annotations

@@ -5,9 +5,12 @@ Most tests swap `ui.torus.view` for a stand-in (no GL needed), to pin down the a
 released. The last tests run the real view on an offscreen OpenGL context, and are skipped
 when the [torus] extra or OpenGL 3.3 is missing."""
 
+import ctypes
+import json
 import os
 import subprocess
 import sys
+import threading
 import types
 from dataclasses import replace
 
@@ -35,10 +38,12 @@ class FakeContext:
         if FakeContext.fail is not None:
             raise FakeContext.fail
         self.released = 0
+        self.threads = {threading.current_thread()}  # every thread that made or freed it
         FakeContext.instances.append(self)
 
     def release(self):
         self.released += 1
+        self.threads.add(threading.current_thread())
 
 
 class FakeView:
@@ -57,6 +62,7 @@ class FakeView:
         self.camera = OrbitalCamera()
         self.draws: list[tuple[pygame.Rect, object, np.ndarray]] = []
         self.released = 0
+        self.threads = {threading.current_thread()}  # every thread that made, drew or freed it
         FakeView.instances.append(self)
 
     @property
@@ -64,6 +70,7 @@ class FakeView:
         return self.camera.dragging
 
     def draw(self, surface, area, grid, palette):
+        self.threads.add(threading.current_thread())
         if FakeView.fail_draw is not None:
             raise FakeView.fail_draw
         self.draws.append((pygame.Rect(area), grid, palette.copy()))
@@ -74,6 +81,7 @@ class FakeView:
 
     def release(self):
         self.released += 1
+        self.threads.add(threading.current_thread())
 
 
 @pytest.fixture
@@ -230,6 +238,46 @@ def test_every_v_draws_on_one_context_freed_when_the_app_closes(make_app, ui, fa
     assert context.released == 1
     app.close()  # closing twice frees it once
     assert context.released == 1
+
+
+def test_the_app_sets_no_sdl_hints(make_app, monkeypatch):
+    """The app set SDL_FRAMEBUFFER_ACCELERATION=0 for every run, to keep SDL from presenting
+    the window through a GL context of its own. That is the only way SDL 2's Wayland and
+    KMSDRM drivers have to give a window a surface, so there the window could fail to open at
+    all. How SDL presents the window is SDL's choice; the 3D view keeps out of its way on a
+    thread."""
+    for name in [name for name in os.environ if name.startswith("SDL_")]:
+        monkeypatch.setenv(name, os.environ[name])  # recorded: restored after the test
+    monkeypatch.setenv("SDL_FRAMEBUFFER_ACCELERATION", "")
+    monkeypatch.delenv("SDL_FRAMEBUFFER_ACCELERATION")
+    before = {name: value for name, value in os.environ.items() if name.startswith("SDL_")}
+    make_app()
+    assert {name: value for name, value in os.environ.items() if name.startswith("SDL_")} == before
+
+
+def test_every_gl_call_runs_on_one_thread_of_its_own(make_app, ui, fake_view):
+    """SDL may present the window through a GL context it keeps current on the main thread
+    (GLX on x11, EGL on Wayland and KMSDRM). Made on that thread, the 3D view's context took
+    SDL's place (or, under libglvnd, could not be made current over GLX at all). Its context
+    and views are now made, drawn and freed on one other thread, which close() stops."""
+    app = make_app()
+    u = ui(app)
+    for _ in range(2):
+        _enter_3d(app, ui)
+        u.frame(2)
+        u.key(pygame.K_v, "v")
+    _enter_3d(app, ui)
+    u.frame()
+    app.close()
+
+    touched = [*fake_view.instances, *FakeContext.instances]
+    assert all(obj.released == 1 for obj in touched)
+    [thread] = set().union(*(obj.threads for obj in touched))
+    assert thread is not threading.main_thread()
+    assert not thread.is_alive() and app._gl_thread is None
+
+    _enter_3d(app, ui)  # a V after close() starts a new thread
+    assert fake_view.instances[-1].threads != {thread}
 
 
 def test_apply_and_new_in_3d_reach_the_view(make_app, ui, fake_view):
@@ -403,16 +451,146 @@ def test_the_real_3d_view_reuses_one_context_until_the_app_closes(real_3d, ui):
     app = real_3d()
     u = ui(app)
     context = app.torus_view.ctx
+
+    def use_context():
+        with context:
+            context.buffer(b"\0" * 16).release()
+
     for _ in range(3):
         u.frame()
         u.key(pygame.K_v, "v")
         assert app.view_mode == "2D"
-        with context:  # still usable between 3D sessions
-            context.buffer(b"\0" * 16).release()
+        app._on_gl_thread(use_context)  # still usable between 3D sessions, on its thread
         u.key(pygame.K_v, "v")
         assert app.view_mode == "3D", app.torus_status
         assert app.torus_view.ctx is context
 
     app.close()
-    assert app.torus_view is None
+    assert app.torus_view is None and app._gl_thread is None
     assert isinstance(context.mglo, moderngl.InvalidObject)
+
+
+def test_the_real_3d_view_leaves_the_main_threads_gl_context_current(make_app, ui):
+    """How SDL presents the window on Wayland and KMSDRM: an EGL context it keeps current on
+    the main thread (here a stand-in). The 3D view made its own context current there and,
+    leaving `with ctx:`, left none, so SDL would draw into nothing and the window froze."""
+    moderngl = pytest.importorskip("moderngl", exc_type=ImportError)
+    try:
+        egl = ctypes.CDLL("libEGL.so.1")
+    except OSError:
+        pytest.skip("no libEGL")
+    egl.eglGetCurrentContext.restype = egl.eglGetCurrentDisplay.restype = ctypes.c_void_p
+    egl.eglMakeCurrent.argtypes = [ctypes.c_void_p] * 4
+    try:  # made current on this thread, as SDL's renderer context is
+        sdl_context = moderngl.create_standalone_context(require=330, backend="egl")
+    except Exception as exc:
+        pytest.skip(f"no EGL context: {exc}")
+    try:
+        current = egl.eglGetCurrentContext()
+        assert current
+        app = make_app()
+        u = ui(app)
+        u.key(pygame.K_v, "v")
+        if app.view_mode != "3D":
+            pytest.skip(f"3D view unavailable here: {app.torus_status}")
+        u.frame(2)
+        assert egl.eglGetCurrentContext() == current
+        u.key(pygame.K_v, "v")
+        u.key(pygame.K_v, "v")
+        u.frame()
+        app.close()
+        assert egl.eglGetCurrentContext() == current
+        sdl_context.buffer(b"\0" * 16).release()  # still current: no `with` needed
+    finally:
+        egl.eglMakeCurrent(egl.eglGetCurrentDisplay(), None, None, None)
+        sdl_context.release()
+
+
+# The app on SDL's offscreen driver, which (as Wayland and KMSDRM must) presents the window
+# through a GL renderer texture, with SDL's EGL context current on the main thread. `probe`
+# reports whether plain pygame presents that way here; `app` reports what the app does.
+_SDL_GL_WINDOW_SCRIPT = """
+import ctypes, json, sys
+import numpy as np
+import pygame
+
+def report(**result):
+    print(json.dumps(result))
+    sys.exit()
+
+try:
+    egl, gl = ctypes.CDLL("libEGL.so.1"), ctypes.CDLL("libOpenGL.so.0")
+except OSError as exc:
+    report(gl=False, why=str(exc))
+egl.eglGetCurrentContext.restype = ctypes.c_void_p
+
+def shown(app):
+    # What SDL presented (read back with its context) equals what the app drew.
+    width, height = app.screen.get_size()
+    pixels = (ctypes.c_ubyte * (width * height * 4))()
+    gl.glFinish()
+    gl.glReadPixels(0, 0, width, height, 0x1908, 0x1401, pixels)  # RGBA, unsigned bytes
+    presented = np.frombuffer(pixels, np.uint8).reshape(height, width, 4)[::-1, :, :3]
+    return bool(np.array_equal(presented, pygame.surfarray.array3d(app.screen).swapaxes(0, 1)))
+
+def press_v(app, frames=3):
+    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_v, unicode="v", mod=0))
+    for _ in range(frames):
+        app.step_frame()
+
+if sys.argv[1] == "probe":
+    pygame.init()
+    pygame.display.set_mode((64, 64))
+    pygame.display.flip()
+    report(gl=bool(egl.eglGetCurrentContext()))
+
+from latticelife.config import DEFAULT_CONFIG_PATH, load_config
+from latticelife.ui.app import App
+
+app = App(load_config(DEFAULT_CONFIG_PATH))
+app.step_frame()
+sdl_context = egl.eglGetCurrentContext()
+if not sdl_context:
+    report(sdl_gl=False)
+result = dict(sdl_gl=True, shown_2d=shown(app))
+press_v(app)
+result.update(mode=app.view_mode, status=app.torus_status)
+if app.view_mode == "3D":
+    result.update(kept_3d=egl.eglGetCurrentContext() == sdl_context, shown_3d=shown(app))
+    press_v(app)
+    result.update(shown_back_in_2d=shown(app))
+app.close()
+result.update(kept_after_close=egl.eglGetCurrentContext() == sdl_context)
+report(**result)
+"""
+
+
+def _run_on_sdl_gl_window(mode: str) -> dict:
+    env = {name: value for name, value in os.environ.items() if not name.startswith("SDL_")}
+    env.update(SDL_VIDEODRIVER="offscreen", SDL_AUDIODRIVER="dummy", PYGAME_HIDE_SUPPORT_PROMPT="1")
+    result = subprocess.run(
+        [sys.executable, "-c", _SDL_GL_WINDOW_SCRIPT, mode],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_the_3d_view_keeps_a_window_sdl_presents_through_gl_working():
+    """End to end, on a window SDL presents through its own GL context (Wayland's and KMSDRM's
+    only way): the app forced SDL off that path with SDL_FRAMEBUFFER_ACCELERATION=0, which on
+    Wayland and KMSDRM can stop the window opening; and where SDL took that path anyway,
+    entering 3D took over SDL's context, so the window showed black and stayed frozen even back
+    in 2D."""
+    pytest.importorskip("moderngl", exc_type=ImportError)
+    if not _run_on_sdl_gl_window("probe")["gl"]:
+        pytest.skip("SDL's offscreen driver does not present through GL here")
+    result = _run_on_sdl_gl_window("app")
+    assert result["sdl_gl"] and result["shown_2d"]  # the app left SDL's choice alone
+    if result["mode"] != "3D":
+        pytest.skip(f"3D view unavailable here: {result['status']}")
+    assert result["kept_3d"] and result["shown_3d"], result
+    assert result["shown_back_in_2d"] and result["kept_after_close"], result

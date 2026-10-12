@@ -30,12 +30,15 @@ and overlays work unchanged. It follows the live session every frame — Apply, 
 window resizes need no rebuild. A drag on the torus rotates it and the wheel over it zooms;
 grid clicks edit cells in 2D only. Leaving 3D (V again, or exiting) releases every GL object.
 If 3D cannot start, or fails while drawing, the app stays in (or returns to) 2D and a short
-status line between the chart and the grid says why for `STATUS_SECONDS`.
+status line between the chart and the grid says why for `STATUS_SECONDS`. Every OpenGL call of
+the 3D view runs on a thread of its own (`App._on_gl_thread`), so the window is created and
+presented exactly as SDL chooses on every video driver.
 """
 
 from __future__ import annotations
 
-import os
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -321,10 +324,9 @@ def _draw_keyboard_hints(
 
 class App:
     def __init__(self, config: Config) -> None:
-        # The 3D view renders with an OpenGL context of its own. On some Linux GPUs SDL would
-        # present this (non-GL) window through a hidden GL context, and the two would compete
-        # for the thread; this keeps SDL on its plain framebuffer (unless the user set it).
-        os.environ.setdefault("SDL_FRAMEBUFFER_ACCELERATION", "0")
+        # No SDL hints: how SDL presents the window is its choice (`_on_gl_thread` says why the
+        # 3D view needs none). SDL_FRAMEBUFFER_ACCELERATION=0, say, takes away the only way
+        # SDL 2's Wayland and KMSDRM drivers have to give a window a surface.
         pygame.init()
         pygame.display.set_caption("LatticeLife")
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE)
@@ -354,6 +356,9 @@ class App:
         # until close(). A context per V would cost memory and driver threads on each toggle,
         # as the driver does not give back all of a destroyed one.
         self._gl_context: moderngl.Context | None = None
+        # The one thread that context is made, used and released on (`_on_gl_thread`):
+        # started by the first V, stopped by close().
+        self._gl_thread: ThreadPoolExecutor | None = None
 
         self.palette = render.build_palette(self.lifeforms)
         self.geometric_renderer = render.GeometricRenderer(BACKGROUND_COLOR)
@@ -476,8 +481,8 @@ class App:
 
         try:
             if self._gl_context is None:
-                self._gl_context = create_offscreen_context()
-            view = TorusView(BACKGROUND_COLOR, ctx=self._gl_context)
+                self._gl_context = self._on_gl_thread(create_offscreen_context)
+            view = self._on_gl_thread(TorusView, BACKGROUND_COLOR, ctx=self._gl_context)
         except Exception as exc:  # no OpenGL 3.3, a driver that rejects the shaders, ...
             self._release_gl_context()  # the next V starts over on a fresh context
             self._set_torus_status(f"3D view unavailable: {_short_error(exc)}")
@@ -487,26 +492,48 @@ class App:
         self.view_mode = "3D"
         self._set_torus_status(None)
 
+    def _on_gl_thread[T](self, fn: Callable[..., T], /, *args, **kwargs) -> T:
+        """`fn(*args, **kwargs)` run on the 3D view's GL thread, waited for: its result, or its
+        exception raised here.
+
+        Which OpenGL context is current is per thread, and the main thread may already have
+        one: SDL presents a (non-GL) window through a GL renderer texture when it can — on x11
+        with GLX, on Wayland and KMSDRM (no other way there) with EGL — and never checks
+        whether something else changed what is current. On that thread the offscreen context
+        would take over (or, leaving `with ctx:`, clear) SDL's EGL context, freezing the window,
+        and under libglvnd could not be made current at all over SDL's GLX one. Every call
+        that makes, uses or releases the offscreen context comes here instead, so SDL's own
+        context and its choice of how to present the window are never touched."""
+        if self._gl_thread is None:
+            self._gl_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="latticelife-gl")
+        return self._gl_thread.submit(fn, *args, **kwargs).result()
+
     def _leave_3d(self, status: str | None = None) -> None:
         """Back to 2D, releasing the 3D view's GL objects (the context stays for the next V)."""
         view, self.torus_view = self.torus_view, None
         self.view_mode = "2D"
         self._set_torus_status(status)
         if view is not None:
-            view.release()
+            self._on_gl_thread(view.release)
 
     def _release_gl_context(self) -> None:
         context, self._gl_context = self._gl_context, None
         if context is not None:
-            context.release()
+            self._on_gl_thread(context.release)
 
     def close(self) -> None:
-        """Release what the app holds outside pygame (the 3D view and its GL context)."""
+        """Release what the app holds outside pygame (the 3D view, its GL context and the
+        thread they live on)."""
         try:
             if self.torus_view is not None:
                 self._leave_3d()
         finally:
-            self._release_gl_context()
+            try:
+                self._release_gl_context()
+            finally:
+                thread, self._gl_thread = self._gl_thread, None
+                if thread is not None:
+                    thread.shutdown()
 
     # --- events ------------------------------------------------------------
 
@@ -714,8 +741,13 @@ class App:
         """The torus over the grid area; if the GL side fails, back to 2D with the reason."""
         assert self.torus_view is not None
         try:
-            self.torus_view.draw(
-                self.screen, self.layout.grid_rect(), self.session.grid, self.palette
+            # The blit into the window surface happens there too, while this thread waits.
+            self._on_gl_thread(
+                self.torus_view.draw,
+                self.screen,
+                self.layout.grid_rect(),
+                self.session.grid,
+                self.palette,
             )
         except Exception as exc:  # a lost GPU, a grid larger than a GL texture, ...
             self._leave_3d(f"3D view stopped: {_short_error(exc)}")
