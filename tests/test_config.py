@@ -155,6 +155,24 @@ def test_odd_sizes_are_fine_without_wrap(tmp_path):
     assert load_config(_write_config(tmp_path, data)).grid.width == 51
 
 
+def test_an_integer_for_a_float_setting_loads_as_a_float(tmp_path):
+    """So `low = 0` and `low = 0.0` are one setting everywhere, a discovery lineage's
+    fingerprint included (tests/discovery/test_es.py)."""
+    data = _with(_default_data(), "criticality.alive_band.low", 0)
+    data = _with(data, "alerts.stasis_volatility", 1)
+    config = load_config(_write_config(tmp_path, data))
+    assert type(config.criticality.alive_band.low) is float
+    assert type(config.alerts.stasis_volatility) is float
+    assert config.alerts.stasis_volatility == 1.0
+    assert type(config.grid.width) is int
+
+
+def test_an_integer_beyond_float_range_is_rejected_naming_the_key(tmp_path):
+    data = _with(_default_data(), "criticality.weights.damage", 10**400)
+    with pytest.raises(ConfigError, match=r"criticality\.weights\.damage must be a number within"):
+        load_config(_write_config(tmp_path, data))
+
+
 def test_unknown_key_is_rejected(tmp_path):
     data = _with(_default_data(), "grid.widht", 40)
     with pytest.raises(ConfigError, match=r"unknown key grid\.widht"):

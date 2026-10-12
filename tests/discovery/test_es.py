@@ -216,6 +216,22 @@ def test_checkpoint_names_identify_shape_mode_and_settings():
     assert es.settings_id(_settings()) == es.settings_id(_settings())
 
 
+def test_a_lineage_does_not_depend_on_how_its_numbers_are_spelt(tmp_path):
+    """`low = 0` and `low = 0.0` load as equal configs, but the integer was fingerprinted as
+    written: the run silently left its lineage (population and evidence) for a fresh one."""
+    floats = DEFAULT_CONFIG_PATH.read_text()
+    integers, spelt = re.subn(r"(?m)^(\w+ = -?\d+)\.0$", r"\1", floats)
+    assert spelt >= 3  # the bands' `low = 0.0`, at least
+    (tmp_path / "floats.toml").write_text(floats)
+    (tmp_path / "integers.toml").write_text(integers)
+    a = load_config(tmp_path / "floats.toml")
+    b = load_config(tmp_path / "integers.toml")
+    for shape in ("square", "hexagon", "triangle"):
+        assert es.checkpoint_name(es.search_settings(b, shape)) == es.checkpoint_name(
+            es.search_settings(a, shape)
+        )
+
+
 @pytest.mark.parametrize(
     ("shape", "mode"),
     [

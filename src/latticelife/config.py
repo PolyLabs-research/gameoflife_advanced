@@ -260,7 +260,9 @@ _TYPE_NAMES = {"bool": "true or false", "int": "an integer", "float": "a number"
 
 def _build(cls: type, table: Any, name: str) -> Any:
     """Construct dataclass `cls` from TOML table `name`, rejecting missing/unknown keys and
-    values of the wrong type."""
+    values of the wrong type. A float setting written as an integer (`low = 0`) is stored as a
+    float, so nothing downstream can tell it from `low = 0.0` — a discovery lineage's
+    fingerprint (`es.search_settings`) once did, and started a fresh lineage for it."""
     if not isinstance(table, dict):
         raise ConfigError(f"[{name}] must be a table")
     values = dict(table)
@@ -279,6 +281,13 @@ def _build(cls: type, table: Any, name: str) -> Any:
                 f"{name}.{key} must be {_TYPE_NAMES.get(annotation, annotation)} "
                 f"(got {values[key]!r})"
             )
+        if annotation == "float" and type(values[key]) is int:
+            try:
+                values[key] = float(values[key])
+            except OverflowError:  # TOML integers are unbounded in tomllib
+                raise ConfigError(
+                    f"{name}.{key} must be a number within float range (got {values[key]!r})"
+                ) from None
     return cls(**values)
 
 
