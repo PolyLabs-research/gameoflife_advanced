@@ -21,7 +21,7 @@ from latticelife.ui import render
 from latticelife.ui.torus.camera import OrbitalCamera, gl_bytes
 from latticelife.ui.torus.geometry import generate_torus_mesh
 from latticelife.ui.torus.shaders import FRAGMENT_SHADER, SHAPE_CODES, VERTEX_SHADER
-from latticelife.ui.torus.texture_mapper import cell_colors
+from latticelife.ui.torus.texture_mapper import cell_colors, surface_window
 
 MAJOR_RADIUS = 1.0
 MINOR_RADIUS = 0.4
@@ -61,7 +61,8 @@ class TorusRenderer:
             raise
 
     def update_cells(self, grid: LatticeGrid, palette: np.ndarray) -> None:
-        """Upload the grid's current colours; the texture follows the grid's size and shape."""
+        """Upload the grid's current colours; the texture and the cell lookup follow the grid's
+        size, shape and wrap."""
         size = (grid.width, grid.height)
         if self.texture is None or self.texture.size != size:
             if self.texture is not None:
@@ -76,6 +77,10 @@ class TorusRenderer:
         self.texture.write(np.ascontiguousarray(cell_colors(grid, palette)).tobytes())
         self.program["grid_size"].value = size
         self.program["shape"].value = SHAPE_CODES[grid.shape]
+        self.program["wrap"].value = bool(grid.wrap)
+        origin, span = surface_window(grid.shape, grid.width, grid.height, grid.wrap)
+        self.program["lattice_origin"].value = origin
+        self.program["lattice_span"].value = span
 
     def render(
         self,
@@ -84,8 +89,9 @@ class TorusRenderer:
         background: tuple[int, int, int] = (0, 0, 0),
     ) -> None:
         """Draw the torus over a `background` clear of `framebuffer` (which needs a depth
-        attachment). The camera's aspect ratio is matched to the framebuffer first, so a resized
-        target is never drawn stretched."""
+        attachment); beyond a bounded grid's edges the surface shows `background` too. The
+        camera's aspect ratio is matched to the framebuffer first, so a resized target is never
+        drawn stretched."""
         if self.texture is None:
             raise RuntimeError("update_cells() must run before render()")
         width, height = framebuffer.size
@@ -94,6 +100,7 @@ class TorusRenderer:
         self.ctx.viewport = (0, 0, width, height)
         red, green, blue = (c / 255 for c in background)
         framebuffer.clear(red, green, blue, 1.0, depth=1.0)
+        self.program["outside_color"].value = (red, green, blue)
         self.ctx.enable(moderngl.DEPTH_TEST)
 
         self.program["view"].write(gl_bytes(camera.view_matrix))

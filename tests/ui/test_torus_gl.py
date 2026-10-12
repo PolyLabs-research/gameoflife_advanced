@@ -16,7 +16,7 @@ from latticelife.core.lifeform import Lifeform  # noqa: E402
 from latticelife.core.rules import Rule  # noqa: E402
 from latticelife.ui import render  # noqa: E402
 from latticelife.ui.torus.shaders import CELL_LOOKUP, SHAPE_CODES  # noqa: E402
-from latticelife.ui.torus.texture_mapper import surface_cells  # noqa: E402
+from latticelife.ui.torus.texture_mapper import surface_cells, surface_window  # noqa: E402
 from latticelife.ui.torus.view import (  # noqa: E402
     TorusUnavailable,
     TorusView,
@@ -85,6 +85,7 @@ void main() {
     gl_Position = vec4(in_pos, 0.0, 1.0);
 }
 """
+# Red and green: the texel (col, row) a pixel shows, 255 for none; blue: its outline weight.
 _FLAT_FS = (
     "\n#version 330 core\nin vec2 v_uv;\nout vec4 out_color;\n"
     + CELL_LOOKUP
@@ -92,52 +93,113 @@ _FLAT_FS = (
 void main() {
     vec2 p = lattice_point(v_uv);
     ivec2 cell;
+    ivec2 across;
     float edge;
     float extent;
-    find_cell(p, dFdx(p), dFdy(p), cell, edge, extent);
+    find_cell(p, dFdx(p), dFdy(p), cell, across, edge, extent);
     ivec2 texel = grid_texel(cell);
-    out_color = vec4(float(texel.x) / 255.0, float(texel.y) / 255.0, 0.0, 1.0);
+    vec2 shown = texel.x >= 0 ? vec2(texel) / 255.0 : vec2(1.0);
+    out_color = vec4(shown, outline_weight(cell, across, edge, extent), 1.0);
 }
 """
 )
 
 
-@pytest.mark.parametrize(
-    "shape, width, height",
-    [
-        ("square", 50, 50),
-        ("hexagon", 40, 30),
-        ("hexagon", 7, 5),  # odd width: a bounded grid
-        ("triangle", 60, 30),
-        ("triangle", 5, 3),
-    ],
-)
-def test_shader_cell_lookup_matches_its_numpy_twin(gl_ctx, shape, width, height):
-    """Every pixel of the surface's uv square shows the cell `surface_cells` names — the same
-    hexagons and triangles the 2D view draws (tested in test_torus_mapping)."""
-    n = 256
-    with gl_ctx:
-        program = gl_ctx.program(vertex_shader=_FLAT_VS, fragment_shader=_FLAT_FS)
-        quad = gl_ctx.buffer(np.array([-1, -1, 1, -1, -1, 1, 1, 1], dtype="f4").tobytes())
-        vao = gl_ctx.vertex_array(program, [(quad, "2f", "in_pos")])
-        fbo = gl_ctx.simple_framebuffer((n, n))
+def _flat_lookup(ctx, shape, width, height, wrap, n=256) -> np.ndarray:
+    """The flat lookup program over the whole uv square, n x n pixels; image row i is at
+    v = (i + 0.5) / n (GL rows run bottom-up) and column j at u = (j + 0.5) / n."""
+    with ctx:
+        program = ctx.program(vertex_shader=_FLAT_VS, fragment_shader=_FLAT_FS)
+        quad = ctx.buffer(np.array([-1, -1, 1, -1, -1, 1, 1, 1], dtype="f4").tobytes())
+        vao = ctx.vertex_array(program, [(quad, "2f", "in_pos")])
+        fbo = ctx.simple_framebuffer((n, n))
         program["grid_size"].value = (width, height)
         program["shape"].value = SHAPE_CODES[shape]
+        program["wrap"].value = wrap
+        origin, span = surface_window(shape, width, height, wrap)
+        program["lattice_origin"].value = origin
+        program["lattice_span"].value = span
+        program["min_outline_px"].value = render.MIN_OUTLINE_SIZE
         fbo.use()
         fbo.clear()
         vao.render(moderngl.TRIANGLE_STRIP)
         image = np.frombuffer(fbo.read(components=3), np.uint8).reshape(n, n, 3)
         for obj in (vao, quad, program, fbo):
             obj.release()
+    return image
 
-    centres = (np.arange(n) + 0.5) / n  # image row 0 is v = 0 (GL rows run bottom-up)
+
+@pytest.mark.parametrize(
+    "shape, width, height, wrap",
+    [
+        ("square", 50, 50, True),
+        ("square", 7, 5, False),
+        ("hexagon", 40, 30, True),
+        ("hexagon", 7, 5, False),  # odd sizes: bounded grids only
+        ("hexagon", 8, 5, False),
+        ("triangle", 60, 30, True),
+        ("triangle", 5, 3, False),
+        ("triangle", 7, 6, False),
+    ],
+)
+def test_shader_cell_lookup_matches_its_numpy_twin(gl_ctx, shape, width, height, wrap):
+    """Every pixel of the surface's uv square shows the cell `surface_cells` names — the same
+    hexagons and triangles the 2D view draws, each beside its own neighbours (tested in
+    test_torus_mapping) — or, beyond a bounded grid's edges, none."""
+    n = 256
+    image = _flat_lookup(gl_ctx, shape, width, height, wrap, n)
+    centres = (np.arange(n) + 0.5) / n
     u, v = np.meshgrid(centres, centres)
-    rows, cols = surface_cells(shape, width, height, u, v)
-    mismatched = (image[..., 0] != cols) | (image[..., 1] != rows)
+    rows, cols = surface_cells(shape, width, height, u, v, wrap=wrap)
+    mismatched = (image[..., 0] != cols % 256) | (image[..., 1] != rows % 256)
     assert mismatched.mean() < 0.001  # float32 vs float64 may differ on an exact edge
+    if not wrap and shape != "square":
+        assert (rows < 0).mean() > 0.05  # the notches along the edges are in the test
+
+
+@pytest.mark.parametrize("shape, width, height", [("hexagon", 7, 5), ("triangle", 5, 3)])
+def test_outlines_follow_cell_edges_only(gl_ctx, shape, width, height):
+    """Outlines are drawn on every edge of a cell, as in 2D, but not on an edge between two
+    places beyond a bounded grid's edges (the level edges between a triangle grid's notches),
+    where 2D draws nothing."""
+    image = _flat_lookup(gl_ctx, shape, width, height, False)
+    shows_cell = image[..., 0] != 255
+    outlined = image[..., 2] > 64
+    assert outlined[shows_cell].mean() > 0.02  # cells this large are outlined
+    near_a_cell = shows_cell.copy()
+    for _ in range(2):  # grow by 2 px each way
+        near_a_cell = (
+            near_a_cell
+            | np.roll(near_a_cell, 1, 0)
+            | np.roll(near_a_cell, -1, 0)
+            | np.roll(near_a_cell, 1, 1)
+            | np.roll(near_a_cell, -1, 1)
+        )
+    assert not (outlined & ~near_a_cell).any()
 
 
 # --- what the torus shows ---------------------------------------------------------------------
+
+
+def test_a_bounded_grid_shows_the_background_beyond_its_edges(gl_ctx):
+    """A bounded hexagon grid is drawn whole, with the background in the notches along its
+    edges (on the seams, which a camera above the torus sees); a wrapped one has no notches."""
+    seen = {}
+    for wrap in (False, True):
+        grid, palette = _grid("hexagon", 8, 6, wrap=wrap)
+        grid.occupancy[:] = 1
+        grid.lifespans[:] = 1
+        view = TorusView((0, 0, 200), ctx=gl_ctx, samples=0)
+        view.camera.auto_rotate = False
+        view.camera.elevation = 1.2
+        try:
+            image = _draw(view, grid, palette)
+        finally:
+            view.release()
+        cleared = (image == (0, 0, 200)).all(axis=2)
+        seen[wrap] = (_mask(image, (0, 0, 200)) & ~cleared).mean()  # lit, so not the clear colour
+    assert seen[False] > 0.002
+    assert seen[True] == 0
 
 
 def test_alive_cells_light_up_in_their_species_colour(gl_ctx):
