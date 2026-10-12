@@ -366,6 +366,42 @@ def test_the_alert_card_stays_inside_its_card_and_the_full_message_is_shown(make
     assert red.sum() > 50
 
 
+def _reddish_crop(pixels: np.ndarray) -> np.ndarray:
+    """`pixels` (x, y, rgb) cut to the bounding box of its reddish (alert-coloured) pixels."""
+    signed = pixels.astype(int)
+    xs, ys = np.nonzero(signed[..., 0] - signed[..., 1] > 20)
+    return signed[xs.min() : xs.max() + 1, ys.min() : ys.max() + 1]
+
+
+@pytest.mark.parametrize(("size", "fonts"), [((800, 600), None), ((1200, 800), ("lg",))])
+def test_the_alert_card_names_sudden_death_in_full_at_every_panel_width(make_app, ui, size, fonts):
+    """At the minimum panel width (any window up to 960 px wide) the Alert card's text is 84 px
+    wide, narrower than 'Sudden death' in the card font, so the card read 'Sudden …'. A value
+    too wide for that font now takes a smaller one before it is cut; one that fits keeps it."""
+    app = make_app()
+    app.session.paused = True
+    pygame.event.post(pygame.event.Event(pygame.VIDEORESIZE, w=size[0], h=size[1], size=size))
+    app.session.alert = Alert(AlertKind.SUDDEN_DEATH, "Sudden death: gen 1 drop 10->1")
+    ui(app).frame()
+
+    panel = app.layout.panel_width
+    if fonts is None:
+        assert panel == app_module.LayoutManager.MIN_PANEL_WIDTH
+        fonts = app_module.CARD_VALUE_SIZES
+    cards_top = app.play_button.rect.bottom + 16  # two rows of stat cards, Alert bottom right
+    alert_card = (slice(panel // 2, panel - 16), slice(cards_top + 64, cards_top + 120))
+    shown = _reddish_crop(pygame.surfarray.array3d(app.screen)[alert_card])
+
+    def drawn(font: pygame.font.Font) -> np.ndarray:
+        card = pygame.Surface(font.size("Sudden death"))
+        card.fill(app_module.PANEL_BACKGROUND_COLOR)
+        card.blit(font.render("Sudden death", True, app_module.ACCENT_DANGER), (0, 0))
+        return _reddish_crop(pygame.surfarray.array3d(card))
+
+    expected = [drawn(app.fonts.get(name)) for name in fonts]
+    assert any(e.shape == shown.shape and np.abs(e - shown).max() <= 2 for e in expected)
+
+
 def test_the_alert_message_leaves_the_population_chart_uncovered(make_app, ui):
     """The alert banner was drawn over the chart's top-left corner, where a crowded start's
     early peak is plotted, hiding the lines for as long as the alert lasted."""

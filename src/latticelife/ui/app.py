@@ -46,7 +46,7 @@ presented exactly as SDL chooses on every video driver.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -98,6 +98,10 @@ ACCENT_DANGER = (248, 113, 113)
 
 FONT_NAME = "Segoe UI"
 FONT_SIZES = {"xs": 10, "sm": 12, "base": 14, "lg": 16, "xl": 20, "2xl": 24}
+# A stat card's value is drawn in the first of these fonts it fits in, and cut with an ellipsis
+# only if it is too wide even for the last: the narrowest panel's Alert card fits "Sudden death"
+# only in "sm".
+CARD_VALUE_SIZES = ("lg", "base", "sm")
 
 SHORTCUTS = [
     ("Space", "Play / pause"),
@@ -191,6 +195,15 @@ def _fit_text(font: pygame.font.Font, text: str, max_width: int) -> str:
     return text + "…"
 
 
+def _fit_font(
+    fonts: FontManager, text: str, max_width: int, sizes: Sequence[str]
+) -> pygame.font.Font:
+    """The first font of `sizes` in which `text` is at most `max_width` pixels wide, or the
+    last (smallest) if it fits in none."""
+    candidates = [fonts.get(size) for size in sizes]
+    return next((font for font in candidates if font.size(text)[0] <= max_width), candidates[-1])
+
+
 def _short_error(exc: BaseException) -> str:
     """The first line of an exception's message (its type name if it has none)."""
     lines = str(exc).strip().splitlines()
@@ -239,12 +252,14 @@ def _draw_stat_cards(
         label_surf = fonts.get("xs").render(
             _fit_text(fonts.get("xs"), label, text_width), True, CHART_AXIS_COLOR
         )
-        value_surf = fonts.get("lg").render(
-            _fit_text(fonts.get("lg"), value, text_width), True, color
-        )
+        value_font = _fit_font(fonts, value, text_width, CARD_VALUE_SIZES)
+        value_surf = value_font.render(_fit_text(value_font, value, text_width), True, color)
+        # A smaller font's line is centred on where the first font's line sits.
+        line_height = fonts.get(CARD_VALUE_SIZES[0]).get_height()
+        value_y = rect.y + 22 + (line_height - value_surf.get_height()) // 2
         inner = rect.inflate(-2, -2)
         blit_clipped(surface, label_surf, (rect.x + 8, rect.y + 6), inner)
-        blit_clipped(surface, value_surf, (rect.x + 8, rect.y + 22), inner)
+        blit_clipped(surface, value_surf, (rect.x + 8, value_y), inner)
     rows = (len(stats) + 1) // 2
     return rows * (card_height + 8)
 
