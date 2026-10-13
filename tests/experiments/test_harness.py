@@ -2,6 +2,7 @@
 
 import json
 import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,27 @@ def test_map_tasks_runs_inline_or_in_a_pool():
     pooled = list(map_tasks(_square, range(8), workers=2))
     assert sorted(v for _, v in pooled) == [x * x for x in range(8)]
     assert os.getpid() not in {pid for pid, _ in pooled}
+
+
+def _worker_signal_handlers(_):
+    return {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM)}
+
+
+def test_pool_workers_leave_stop_signals_to_the_parent_and_end_quietly_on_sigterm():
+    """While an experiment runs the CLI turns SIGTERM into KeyboardInterrupt. Workers forked then
+    inherited it, so the pool's terminate() on close sometimes printed a worker's
+    KeyboardInterrupt traceback at the end of a successful run."""
+    previous = signal.signal(signal.SIGTERM, signal.default_int_handler)
+    try:
+        handlers = list(map_tasks(_worker_signal_handlers, range(4), workers=2))
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    expected = {
+        signal.SIGINT: signal.SIG_IGN,
+        signal.SIGHUP: signal.SIG_IGN,
+        signal.SIGTERM: signal.SIG_DFL,
+    }
+    assert handlers == [expected] * 4
 
 
 def test_jsonl_lines_are_plain_json(tmp_path):

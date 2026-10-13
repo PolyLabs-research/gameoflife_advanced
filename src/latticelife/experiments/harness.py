@@ -13,9 +13,11 @@ stopped at any point keeps everything it finished. A run started again on the sa
 tasks whose records are already there (`resume_keys`), matched on every field that identifies a
 task, so a record from a different experiment never stands in for one of this run's.
 
-`map_tasks` hands tasks to a `multiprocessing` pool in which SIGINT is ignored: a Ctrl+C then
-reaches only the parent, which stops the pool and re-raises, instead of every worker dying
-mid-task and the pool hanging on their results.
+`map_tasks` hands tasks to a `multiprocessing` pool in which SIGINT and SIGHUP are ignored: a
+Ctrl+C or a closed terminal, which signal the whole foreground process group, then reach only the
+parent, which stops the pool and re-raises, instead of every worker dying mid-task and the pool
+hanging on their results. SIGTERM keeps its default action in the workers, since the pool ends
+them with it whenever it closes.
 """
 
 from __future__ import annotations
@@ -101,8 +103,14 @@ def _hashable(value: Any) -> Any:
     return tuple(value) if isinstance(value, list) else value
 
 
-def _ignore_sigint() -> None:
+def _init_worker_signals() -> None:
+    """Pool worker initializer (see the module docstring). SIGTERM must be reset, not just left:
+    while an experiment runs, the CLI turns SIGTERM into KeyboardInterrupt
+    (`cli._termination_interrupts`), forked workers inherited that, and the pool's terminate()
+    on close then made a worker that was already exiting print a KeyboardInterrupt traceback."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
 
 def map_tasks(fn: Callable[[Any], Any], tasks: Iterable[Any], workers: int) -> Iterator[Any]:
@@ -115,5 +123,5 @@ def map_tasks(fn: Callable[[Any], Any], tasks: Iterable[Any], workers: int) -> I
             yield fn(task)
         return
     context = mp.get_context()
-    with context.Pool(workers, initializer=_ignore_sigint) as pool:
+    with context.Pool(workers, initializer=_init_worker_signals) as pool:
         yield from pool.imap_unordered(fn, tasks, chunksize=1)
