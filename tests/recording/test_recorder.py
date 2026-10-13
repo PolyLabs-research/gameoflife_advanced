@@ -1,3 +1,4 @@
+import functools
 import os
 import sqlite3
 from dataclasses import replace
@@ -359,6 +360,94 @@ def test_unreadable_db_and_unwritable_folder_raise_recorder_open_error(tmp_path)
     finally:
         unreadable.chmod(0o644)
         read_only_folder.chmod(0o755)
+
+
+def _recorded_db(db_path, journal_mode="wal"):
+    """A schema v2 DB holding one session, in `journal_mode`."""
+    with Recorder(db_path) as recorder:
+        recorder.start_session("sess-1", _config(), [Lifeform(1, CONWAY)], 1, seed=1)
+        recorder.record_generation("sess-1", _record(1, [1]))
+    conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA journal_mode = {journal_mode}")
+    conn.close()
+    return db_path
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+@pytest.mark.parametrize("journal_mode", ["wal", "delete"])
+def test_a_read_only_db_raises_recorder_open_error_on_opening(tmp_path, journal_mode):
+    """SQLite opens a file it may only read without complaint. A read-only v2 DB in WAL mode
+    passed every check and escaped as sqlite3.OperationalError ('attempt to write a readonly
+    database') from start_session's INSERT; one in rollback-journal mode from the WAL switch."""
+    db_path = _recorded_db(tmp_path / "read-only.db", journal_mode)
+    before = _db_state(db_path)
+    db_path.chmod(0o444)
+    try:
+        with (
+            pytest.raises(RecorderOpenError, match="read-only.db cannot be written .*readonly"),
+            Recorder(db_path) as recorder,
+        ):
+            recorder.start_session("sess-2", _config(), [Lifeform(1, CONWAY)], 1, seed=2)
+    finally:
+        db_path.chmod(0o644)
+    assert _db_state(db_path) == before
+    assert _journal_mode(db_path) == journal_mode
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+@pytest.mark.parametrize("existing", ["empty", "v2"])
+def test_a_db_in_a_read_only_folder_raises_recorder_open_error(tmp_path, existing):
+    """SQLite keeps its journal beside the DB. An existing empty file there escaped as
+    sqlite3.OperationalError from the WAL switch; a v2 DB in WAL mode, which cannot even be read
+    there, was reported as 'not a SQLite database'."""
+    folder = tmp_path / "read-only"
+    folder.mkdir()
+    db_path = folder / "run.db"
+    if existing == "empty":
+        db_path.touch()
+    else:
+        _recorded_db(db_path)
+    before = db_path.read_bytes()
+    folder.chmod(0o555)
+    try:
+        with (
+            pytest.raises(RecorderOpenError, match="run.db cannot be written .*its folder"),
+            Recorder(db_path),
+        ):
+            pass
+        assert sorted(path.name for path in folder.iterdir()) == ["run.db"]
+    finally:
+        folder.chmod(0o755)
+    assert db_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("journal_mode", "lock"),
+    [("delete", "BEGIN EXCLUSIVE"), ("delete", "BEGIN IMMEDIATE"), ("wal", "BEGIN IMMEDIATE")],
+    ids=["exclusive", "reserved", "wal-writer"],
+)
+def test_a_db_another_connection_holds_is_reported_as_in_use(
+    tmp_path, monkeypatch, journal_mode, lock
+):
+    """A held lock outlasting the busy timeout ('database is locked') was reported as 'is not a
+    SQLite database' when it stopped the checks reading the file, and escaped as
+    sqlite3.OperationalError when it stopped the schema write."""
+    db_path = _recorded_db(tmp_path / "busy.db", journal_mode)
+    before = _db_state(db_path)
+    holder = sqlite3.connect(db_path, isolation_level=None)
+    holder.execute(lock)
+    holder.execute("UPDATE session_metadata SET seed = 5")  # uncommitted
+    monkeypatch.setattr(sqlite3, "connect", functools.partial(sqlite3.connect, timeout=0.05))
+    try:
+        with (
+            pytest.raises(RecorderOpenError, match="busy.db is in use by another process"),
+            Recorder(db_path),
+        ):
+            pass
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert _db_state(db_path) == before
 
 
 @pytest.mark.parametrize(

@@ -5,8 +5,9 @@ appears here, and only here in `src/`, for user-facing CLI output.
 
 Exit status: 0 success; 1 the discovery worker failed (crashed, did not stop, or another
 `discover` run holds the same lineage); 2 bad arguments, an invalid config, or a `--db` path
-that is not a LatticeLife schema v2 database or cannot be opened at all (each reported in one
-line on stderr, no traceback); 130 an `autorun` interrupted by Ctrl+C, SIGTERM or SIGHUP, after
+that is not a LatticeLife schema v2 database, cannot be opened or written (a read-only file, a
+folder that cannot be written), or is locked by another process (each reported in one line on
+stderr, no traceback); 130 an `autorun` interrupted by Ctrl+C, SIGTERM or SIGHUP, after
 everything recorded so far has been flushed (or a `discover` whose worker a second Ctrl+C had
 killed).
 

@@ -3,6 +3,8 @@ config into tmp_path with relative output paths, which resolve next to that conf
 no pyproject.toml), and points LATTICELIFE_LOG_DIR at its own directory — nothing touches the
 project's real out/."""
 
+import contextlib
+import functools
 import json
 import multiprocessing as mp
 import os
@@ -459,6 +461,67 @@ def test_autorun_reports_a_db_path_it_cannot_open_in_one_line(
     assert message in err and "Traceback" not in err
     events = [event["event"] for event in _events(log_dir, "app")]
     assert "invalid_input" in events and "unhandled_exception" not in events
+
+
+def _a_read_only_db(db, cleanup, monkeypatch):
+    db.chmod(0o444)
+    cleanup.callback(db.chmod, 0o644)
+    return db
+
+
+def _an_empty_file_in_a_read_only_folder(db, cleanup, monkeypatch):
+    folder = db.parent / "read-only"
+    folder.mkdir()
+    (folder / "empty.db").touch()
+    folder.chmod(0o555)
+    cleanup.callback(folder.chmod, 0o755)
+    return folder / "empty.db"
+
+
+def _a_db_another_process_holds(db, cleanup, monkeypatch):
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode = delete")
+    conn.close()
+    holder = sqlite3.connect(db, isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    cleanup.callback(holder.close)
+    # The recorder's busy timeout, cut from 5 s.
+    monkeypatch.setattr(sqlite3, "connect", functools.partial(sqlite3.connect, timeout=0.05))
+    return db
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+@pytest.mark.parametrize(
+    ("make_db", "message"),
+    [
+        (_a_read_only_db, "run.db cannot be written (attempt to write a readonly database)"),
+        (_an_empty_file_in_a_read_only_folder, "empty.db cannot be written"),
+        (_a_db_another_process_holds, "run.db is in use by another process (database is locked)"),
+    ],
+    ids=["read-only-file", "read-only-folder", "in-use"],
+)
+def test_autorun_reports_a_db_it_cannot_write_in_one_line(
+    tmp_path, log_dir, capsys, monkeypatch, make_db, message
+):
+    """SQLite opens a file it may only read without complaint, so these escaped as
+    sqlite3.OperationalError tracebacks with exit 1 at the first write; a DB locked by another
+    process was reported as 'is not a SQLite database (database is locked)'."""
+    config = write_config(tmp_path)
+    recorded = tmp_path / "run.db"
+    assert _autorun(config, recorded, sessions=1, generations=3) == 0
+    capsys.readouterr()
+
+    with contextlib.ExitStack() as cleanup:
+        db = make_db(recorded, cleanup, monkeypatch)
+        before = db.read_bytes()
+        assert _autorun(config, db, sessions=1, generations=3) == cli.EXIT_USAGE
+        err = capsys.readouterr().err
+        assert db.read_bytes() == before
+    assert err.startswith("latticelife autorun: ") and err.count("\n") == 1
+    assert message in err and "Traceback" not in err
+    events = [event["event"] for event in _events(log_dir, "app")]
+    assert "invalid_input" in events and "unhandled_exception" not in events
+    assert _session_rows(recorded) == [(3, 3, 1, 3)]
 
 
 _AUTORUN_SCRIPT = textwrap.dedent(

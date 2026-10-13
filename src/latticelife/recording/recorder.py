@@ -11,8 +11,12 @@ indexes and triggers of the user's own are fine) is checked table by table; any 
 legacy `species.db`, a later schema, another application's database that also uses
 `user_version` 2, one holding only views/indexes/triggers, not SQLite at all) raises
 `RecorderSchemaError` before a single PRAGMA or DDL statement is written to it. A path SQLite
-cannot open at all (a directory, a file without read permission, a new file in a folder that
-cannot be written) raises `RecorderOpenError`.
+cannot open, read or write (a directory; a file without read or write permission; a file, new
+or not, in a folder that cannot be written, where SQLite keeps its journal), or a file another
+process holds locked, raises `RecorderOpenError` — while the Recorder opens, not at the first
+row recorded: SQLite opens a file it may only read without a word, so the schema is written in
+one transaction that also sets `user_version` again, and that write is where a read-only file
+fails.
 
 `lifeform_meta.birth`/`survive` hold `core.rules.format_counts` text: the spec's compact digits
 (`'3'`, `'23'`) while every count is <= 9, comma-separated once one reaches 10 (`'2,10,12'`,
@@ -87,8 +91,18 @@ class RecorderSchemaError(ValueError):
 
 
 class RecorderOpenError(ValueError):
-    """SQLite cannot open the DB path at all: a directory, a file without read permission, a
-    new file in a folder that cannot be written."""
+    """SQLite cannot open, read or write the DB path (a directory, a file without read or write
+    permission, a file in a folder that cannot be written), or another process holds it
+    locked."""
+
+
+# Primary SQLite result codes (the low byte of `sqlite_errorcode`) that describe the path, its
+# permissions or another process rather than what the file holds.
+_IN_USE = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+_NOT_WRITABLE = frozenset({sqlite3.SQLITE_READONLY, sqlite3.SQLITE_FULL})
+_NOT_OPENABLE = frozenset(
+    {sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_PERM, sqlite3.SQLITE_AUTH, sqlite3.SQLITE_IOERR}
+)
 
 
 @functools.cache
@@ -168,6 +182,28 @@ class Recorder:
             self._connection = None
             conn.close()
 
+    def _access_error(self, exc: sqlite3.Error) -> RecorderOpenError | None:
+        """The RecorderOpenError for an SQLite error about the path rather than its contents
+        (another process holds it; it, or its folder, cannot be opened or written), or None."""
+        code = (exc.sqlite_errorcode or 0) & 0xFF
+        if code in _IN_USE:
+            return RecorderOpenError(
+                f"{self.db_path} is in use by another process ({exc}); try again once it has "
+                "finished, or record into another file (autorun --db)"
+            )
+        if exc.sqlite_errorname == "SQLITE_READONLY_DIRECTORY":
+            return RecorderOpenError(
+                f"{self.db_path} cannot be written ({exc}): its folder cannot be written, and "
+                "SQLite keeps its journal there"
+            )
+        if code in _NOT_WRITABLE:
+            return RecorderOpenError(f"{self.db_path} cannot be written ({exc})")
+        if code in _NOT_OPENABLE:
+            return RecorderOpenError(
+                f"{self.db_path} cannot be opened as a SQLite database ({exc})"
+            )
+        return None
+
     def _prepare_schema(self, conn: sqlite3.Connection) -> None:
         """Create the v2 schema in a new/empty file, or verify an existing v2 file. Everything
         that writes (WAL, DDL, user_version) happens only after the checks pass."""
@@ -177,18 +213,38 @@ class Recorder:
             # triggers is somebody else's database, not an empty one.
             objects = conn.execute("SELECT type, name FROM sqlite_master").fetchall()
         except sqlite3.DatabaseError as exc:
+            access_error = self._access_error(exc)
+            if access_error is not None:
+                raise access_error from None
             raise RecorderSchemaError(
                 f"{self.db_path} is not a SQLite database ({exc}); refusing to use it"
             ) from None
+        if version != 0 or objects:
+            self._check_v2_schema(conn, version, objects)
+
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            # Adds any v2 table the file is missing. Setting user_version, even to the value it
+            # has, is a write: a file SQLite could open only for reading fails here.
+            conn.executescript(
+                f"BEGIN IMMEDIATE; {_SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+            )
+        except sqlite3.OperationalError as exc:
+            if conn.in_transaction:
+                conn.rollback()
+            access_error = self._access_error(exc)
+            if access_error is None:
+                raise
+            raise access_error from None
+
+    def _check_v2_schema(
+        self, conn: sqlite3.Connection, version: int, objects: list[tuple[str, str]]
+    ) -> None:
+        """Raise RecorderSchemaError unless this non-empty file is a LatticeLife schema v2
+        database."""
         tables = {
             name for kind, name in objects if kind == "table" and not name.startswith("sqlite_")
         }
-
-        if version == 0 and not objects:
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.executescript(f"BEGIN; {_SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
-            return
-
         # user_version 2 alone does not make a file ours: other applications version their own
         # schemas with it too. Ours holds at least one v2 table and no table of anyone else's.
         v2_tables = set(_schema_columns())
@@ -215,8 +271,6 @@ class Recorder:
                     f"{self.db_path}: table {table} has columns {', '.join(actual)}, not the "
                     f"schema v{SCHEMA_VERSION} columns {', '.join(expected)}; refusing to modify it"
                 )
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.executescript(_SCHEMA)  # adds any v2 table the file is missing
 
     def _conn(self) -> sqlite3.Connection:
         if self._connection is None:
