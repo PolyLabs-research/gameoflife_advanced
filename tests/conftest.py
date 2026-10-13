@@ -10,7 +10,8 @@ Four guards:
 - An audit hook (`subprocess_site/out_guard.py`) refuses, with PermissionError, anything beyond
   reading that this process, a worker forked from it or a Python subprocess a test starts does
   to `PROJECT_ROOT/out`: opening a file there for writing; creating, renaming, removing or
-  touching anything; connecting SQLite to a database there. Subprocesses get it from
+  touching anything; connecting SQLite to a database there — by its own path, through a
+  symlink, or by a name relative to a directory descriptor open on it. Subprocesses get it from
   `subprocess_site/sitecustomize.py`, so a test that sets PYTHONPATH for one must keep the
   inherited entries after its own (`os.pathsep.join([..., os.environ["PYTHONPATH"]])`). A test
   whose code had a change refused fails at teardown, even if that code caught the error. Tests

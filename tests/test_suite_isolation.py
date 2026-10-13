@@ -79,6 +79,29 @@ def _by_dir_fd(change):
     return run
 
 
+def _through_a_link_to(target, change):
+    """`change(link)` with `link` a symlink, beside the stand-in project, to `target(out)`."""
+
+    def run(out, tmp_path):
+        link = tmp_path / "link"
+        link.symlink_to(target(out))
+        change(link)
+
+    return run
+
+
+def _the_out(out):
+    return out
+
+
+def _the_rules(out):
+    return out / "discovered_rules.jsonl"
+
+
+def _the_project(out):
+    return out.parent
+
+
 CHANGES = {
     "append": lambda out, tmp: open(out / "discovered_rules.jsonl", "a"),
     "truncate": lambda out, tmp: open(out / "discovered_rules.jsonl", "w"),
@@ -100,6 +123,35 @@ CHANGES = {
     "remove by dir_fd": _by_dir_fd(lambda fd: os.unlink("discovered_rules.jsonl", dir_fd=fd)),
     "rmdir by dir_fd": _by_dir_fd(lambda fd: os.rmdir("discovery", dir_fd=fd)),
     "mkdir by dir_fd": _by_dir_fd(lambda fd: os.mkdir("logs", dir_fd=fd)),
+    # Round 3: these went through, matched as written against out/'s own path.
+    "os.open by dir_fd": _by_dir_fd(
+        lambda fd: os.open("discovered_rules.jsonl", os.O_WRONLY | os.O_APPEND, dir_fd=fd)
+    ),
+    "os.open new file by dir_fd": _by_dir_fd(
+        lambda fd: os.open("new.jsonl", os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=fd)
+    ),
+    "append through a linked folder": _through_a_link_to(
+        _the_out, lambda link: open(link / "discovered_rules.jsonl", "a")
+    ),
+    "append through a linked file": _through_a_link_to(_the_rules, lambda link: open(link, "a")),
+    "new file through a linked folder": _through_a_link_to(
+        _the_project, lambda link: (link / "out" / "new.jsonl").write_text("x")
+    ),
+    "remove through a linked folder": _through_a_link_to(
+        _the_out, lambda link: (link / "discovered_rules.jsonl").unlink()
+    ),
+    "rename into through a linked folder": _through_a_link_to(
+        _the_out, lambda link: _rename_into(link, link.parent)
+    ),
+    "truncate through a linked file": _through_a_link_to(
+        _the_rules, lambda link: os.truncate(link, 0)
+    ),
+    "sqlite through a linked folder": _through_a_link_to(
+        _the_out, lambda link: sqlite3.connect(link / "latticelife.db")
+    ),
+    "rmtree through a linked folder": _through_a_link_to(
+        _the_project, lambda link: shutil.rmtree(link / "out")
+    ),
 }
 
 
@@ -129,7 +181,37 @@ def test_changes_beside_out_are_allowed(fake_out, out_guard, tmp_path):
     (fake_out.parent / "outside.jsonl").write_text("x")
     (fake_out.parent / "out-of-date").mkdir()
     sqlite3.connect(fake_out.parent / "other.db").close()
+    # A symlink into out/ is outside it: making and removing one changes nothing there.
+    (tmp_path / "link").symlink_to(fake_out / "discovered_rules.jsonl")
+    (tmp_path / "link").unlink()
+    # A relative path opened while a folder outside out/ is held open lands in the current one.
+    fd = os.open(fake_out.parent, os.O_RDONLY)
+    try:
+        Path("relative.jsonl").write_text("x")
+    finally:
+        os.close(fd)
     assert out_guard.refused == []
+    assert (fake_out / "discovered_rules.jsonl").read_text() == KEPT
+
+
+def test_a_root_that_is_a_symlink_guards_the_folder_it_points_to(guard_also, out_guard, tmp_path):
+    """out/ may be a symlink to a folder on another disk; that folder's own path reaches it
+    too."""
+    disk_out = tmp_path / "disk" / "out"
+    disk_out.mkdir(parents=True)
+    (disk_out / "discovered_rules.jsonl").write_text(KEPT)
+    (tmp_path / "project").mkdir()
+    (tmp_path / "project" / "out").symlink_to(disk_out)
+    guard_also(tmp_path / "project" / "out")
+
+    with pytest.raises(PermissionError, match="must not change the project's real out/"):
+        open(disk_out / "discovered_rules.jsonl", "a")
+    with pytest.raises(PermissionError, match="must not change the project's real out/"):
+        shutil.rmtree(tmp_path / "disk")
+
+    assert (disk_out / "discovered_rules.jsonl").read_text() == KEPT
+    assert len(out_guard.refused) == 2
+    out_guard.refused.clear()
 
 
 def test_removing_another_tree_with_an_out_inside_is_allowed(guard_also, out_guard, tmp_path):
