@@ -16,6 +16,7 @@ import numpy as np
 from latticelife.core.lattice import clone_grid
 from latticelife.core.lifeform import Lifeform
 from latticelife.experiments.criticality import BURN_IN_FRAC
+from latticelife.experiments.periodicity import CycleDetector
 from latticelife.session.session import SimulationSession
 
 
@@ -24,6 +25,10 @@ class TimeseriesResult:
     rho: np.ndarray
     activity: np.ndarray
     frozen_at: int | None
+    # Only with `detect_cycles`: the exact period of the grid and the generation its cycle
+    # starts at (None when no state repeated within `steps`).
+    period: int | None = None
+    transient: int | None = None
 
 
 def run_timeseries(
@@ -33,25 +38,51 @@ def run_timeseries(
     burn_in_frac: float = BURN_IN_FRAC,
     epsilon: float = 1e-6,
     freeze_window: int = 100,
+    detect_cycles: bool = False,
 ) -> TimeseriesResult:
     """Run `steps` generations forward from `session`'s current state, driven by
     `session.step()` (session owns the RNG — no seeding here). rho/activity/freeze-detection
     semantics match the legacy `run_timeseries` exactly: quiet steps are counted from
     int(steps * burn_in_frac) on, so a freeze is only detectable when
     int(steps * burn_in_frac) + freeze_window <= steps (`discover` refuses a config that breaks
-    this: `config.validate_discovery_config`)."""
+    this: `config.validate_discovery_config`).
+
+    `detect_cycles=True` (single-species sessions only: with several species the birth
+    tie-break is random, so a repeated state proves nothing, and ValueError is raised) also
+    reports the grid's exact `period` and `transient` (`experiments.periodicity`). Once a state
+    repeats, the rest of the series is written by periodic extension instead of stepping —
+    exact for deterministic dynamics, and identical to what stepping on would produce — so the
+    session is left on its cycle, at the generation the repeat was seen, not at `steps - 1`.
+    Discovery never sets it, so its scores are unchanged."""
+    if detect_cycles and len(session.lifeforms) != 1:
+        raise ValueError(
+            "cycle detection needs deterministic dynamics: a session with exactly one species "
+            f"(this one has {len(session.lifeforms)})"
+        )
     total_cells = session.grid.n_cells
     rho = np.zeros(steps, dtype=float)
     activity = np.zeros(steps, dtype=float)
     frozen_at: int | None = None
     quiet_streak = 0
     burn_in = int(steps * burn_in_frac)
+    detector = CycleDetector() if detect_cycles else None
+    period: int | None = None
+    transient: int | None = None
 
     rho[0] = np.count_nonzero(session.grid.occupancy == lifeform_id) / total_cells
+    if detector is not None:
+        detector.observe(session.grid.occupancy, 0)
 
     for step in range(1, steps):
-        session.step()
-        rho[step] = np.count_nonzero(session.grid.occupancy == lifeform_id) / total_cells
+        if period is None:
+            session.step()
+            rho[step] = np.count_nonzero(session.grid.occupancy == lifeform_id) / total_cells
+            if detector is not None:
+                repeat = detector.observe(session.grid.occupancy, step)
+                if repeat is not None:
+                    period, transient = repeat
+        else:
+            rho[step] = rho[step - period]
         activity[step] = abs(rho[step] - rho[step - 1])
 
         if step >= burn_in and activity[step] <= epsilon:
@@ -61,7 +92,9 @@ def run_timeseries(
         else:
             quiet_streak = 0
 
-    return TimeseriesResult(rho=rho, activity=activity, frozen_at=frozen_at)
+    return TimeseriesResult(
+        rho=rho, activity=activity, frozen_at=frozen_at, period=period, transient=transient
+    )
 
 
 def run_damage_spreading(

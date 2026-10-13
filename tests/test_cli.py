@@ -739,3 +739,179 @@ def test_sigkill_to_discover_still_stops_its_worker(tmp_path, log_dir):
     assert _wait_for(lambda: _gone(worker_pid), timeout=15)
     stopped = _events(log_dir, "discovery")[-1]
     assert (stopped["event"], stopped["reason"]) == ("worker_stopped", "parent exited")
+
+
+# --- census / sweep / soup ---------------------------------------------------------------------
+
+
+def _records(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def test_census_runs_every_edge_triangle_rule_and_resumes(tmp_path, log_dir, capsys):
+    config = write_config(tmp_path, grid__triangle_mode="edge")
+    out = tmp_path / "census.jsonl"
+    argv = ["census", "--shape", "triangle", "--grid", "8", "--steps", "15", "--tail", "5"]
+    argv += ["--config", str(config), "--out", str(out)]
+    assert cli.main(argv) == 0
+
+    summary = json.loads(capsys.readouterr().out)
+    assert (summary["rules"], summary["planned"], summary["records"]) == (256, 256, 256)
+    assert summary["skipped"] == 0
+    assert sum(summary["outcomes"].values()) == 256
+    records = _records(out)
+    assert len(records) == 256
+    assert {r["triangle_mode"] for r in records} == {"edge"}
+    assert all(r["outcome"] in ("extinct", "fixed", "periodic", "unsettled") for r in records)
+    assert not any("4" in r["rule"] for r in records)  # degree 3: no count above 3 exists
+    assert {r["rule"] for r in records} >= {"B/S", "B3/S3", "B0123/S0123"}
+
+    assert cli.main(argv) == 0  # nothing left to do
+    again = json.loads(capsys.readouterr().out)
+    assert (again["records"], again["skipped"]) == (0, 256)
+    assert len(_records(out)) == 256
+
+
+def test_census_takes_listed_random_and_dual_rules(tmp_path, log_dir, capsys):
+    config = write_config(tmp_path, grid__triangle_mode="edge")
+    out = tmp_path / "c.jsonl"
+    base = ["census", "--grid", "8", "--steps", "10", "--tail", "3"]
+    base += ["--config", str(config), "--out", str(out)]
+    argv = [*base, "--shape", "hexagon", "--rules", "B2/S34", "B2/S35", "--seeds", "2"]
+    assert cli.main([*argv, "--grid", "8", "10"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert (summary["rules"], summary["records"]) == (2, 8)
+    assert cli.main([*base, "--shape", "hexagon", "--rules", "random:5"]) == 0
+    assert json.loads(capsys.readouterr().out)["rules"] == 5
+    # One rule per complement pair on the edge-triangle lattice: 256 rules, 16 self-dual.
+    assert cli.main([*base, "--shape", "triangle", "--rules", "dual"]) == 0
+    assert json.loads(capsys.readouterr().out)["rules"] == (256 + 16) // 2
+
+
+def test_census_refuses_to_enumerate_the_twelve_neighbour_triangle_rules(tmp_path, log_dir, capsys):
+    config = write_config(tmp_path)  # triangle_mode edge+vertex: 2^26 rules
+    argv = ["census", "--shape", "triangle", "--config", str(config)]
+    argv += ["--out", str(tmp_path / "x.jsonl")]
+    assert cli.main(argv) == 2
+    assert "67,108,864 rules" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["census", "--shape", "hexagon", "--rules", "B7/S23"], "6 neighbours"),
+        (["census", "--shape", "hexagon", "--rules", "all", "B3/S23"], "stand alone"),
+        (["census", "--shape", "hexagon", "--rules", "B3S23"], "not a B/S rule"),
+        (["census", "--shape", "hexagon", "--grid", "7"], "even width"),
+        (
+            ["sweep", "--shape", "square", "--rule", "B3/S23", "--densities", "0.5:0.1:0.1"],
+            "LO <= HI",
+        ),
+        (
+            ["sweep", "--shape", "square", "--rule", "B3/S23", "--densities", "1.5"],
+            "between 0 and 1",
+        ),
+        (["soup", "--shape", "square", "--rule", "B9/S23"], "8 neighbours"),
+    ],
+)
+def test_experiment_argument_problems_exit_2_with_one_line(
+    tmp_path, log_dir, capsys, argv, message
+):
+    config = write_config(tmp_path)
+    assert cli.main([*argv, "--config", str(config), "--out", str(tmp_path / "x.jsonl")]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert message in captured.err
+    assert captured.err.count("\n") == 1
+    assert not (tmp_path / "x.jsonl").exists()
+
+
+def test_sweep_records_densities_from_ranges_and_reports_thresholds(tmp_path, log_dir, capsys):
+    config = write_config(tmp_path)
+    out = tmp_path / "sweep.jsonl"
+    argv = ["sweep", "--rule", "B3/S23", "--shape", "square", "--grid", "8", "10"]
+    argv += ["--densities", "0.1:0.5:0.2", "0.9", "--seeds", "2", "--steps", "20"]
+    argv += ["--config", str(config), "--out", str(out), "--workers", "2"]
+    assert cli.main(argv) == 0
+
+    summary = json.loads(capsys.readouterr().out)
+    assert (summary["rule"], summary["planned"], summary["records"]) == ("B3/S23", 16, 16)
+    records = _records(out)
+    assert sorted({r["density"] for r in records}) == [0.1, 0.3, 0.5, 0.9]
+    assert {r["grid"] for r in records} == {8, 10}
+    assert all(isinstance(r["survived"], bool) for r in records)
+    assert set(summary["critical_densities"]) == {"8", "10"}
+    assert all(isinstance(v, list) for v in summary["critical_densities"].values())
+
+
+def test_soup_catalogues_objects(tmp_path, log_dir, capsys):
+    config = write_config(tmp_path)
+    out = tmp_path / "soups.jsonl"
+    argv = ["soup", "--rule", "B3/S23", "--shape", "square", "--grid", "16", "--seeds", "3"]
+    argv += ["--steps", "80", "--density", "0.3", "--max-period", "30"]
+    argv += ["--config", str(config), "--out", str(out)]
+    assert cli.main(argv) == 0
+
+    summary = json.loads(capsys.readouterr().out)
+    assert (summary["rule"], summary["planned"], summary["records"]) == ("B3/S23", 3, 3)
+    assert (
+        summary["distinct_objects"] == len(summary["objects"]) or summary["distinct_objects"] > 10
+    )
+    for entry in summary["objects"]:
+        assert entry["kind"] in ("still", "oscillator", "spaceship")
+        assert entry["count"] >= 1
+    records = _records(out)
+    assert [r["seed"] for r in records] == [1, 2, 3]
+    assert all(set(r["unidentified"]) == {"died", "unsettled", "too_large"} for r in records)
+
+
+def test_experiments_default_their_output_under_the_configs_project_out(tmp_path, log_dir, capsys):
+    """A relative default resolved against the current directory was F17's bug; the experiment
+    commands take the config's project root like every other output."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    config = write_config(project / "config")
+    argv = ["census", "--shape", "triangle", "--rules", "B2/S3", "--grid", "8", "--steps", "5"]
+    argv += ["--tail", "2", "--config", str(config)]
+    assert cli.main(argv) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert Path(summary["out"]) == project / "out" / "census-triangle.jsonl"
+    assert (project / "out" / "census-triangle.jsonl").is_file()
+
+
+def test_sigterm_stops_an_experiment_with_its_records_kept(tmp_path, log_dir):
+    """Like autorun: a termination signal unwinds the run, keeps what finished, exits 130."""
+    config = write_config(tmp_path)
+    out = tmp_path / "census.jsonl"
+    code = textwrap.dedent(
+        f"""
+        import os, signal, sys
+        from latticelife import cli
+        from latticelife.experiments import census
+
+        original = census.classify_rule
+        calls = 0
+        def terminate_on_the_second(task):
+            global calls
+            calls += 1
+            if calls == 2:
+                os.kill(os.getpid(), signal.SIGTERM)  # the first record is already written
+            return original(task)
+        census.classify_rule = terminate_on_the_second
+        sys.exit(cli.main([
+            "census", "--shape", "hexagon", "--rules", "B2/S34", "B2/S35", "B3/S23",
+            "--seeds", "4", "--grid", "8", "--steps", "5", "--tail", "2",
+            "--config", {str(config)!r}, "--out", {str(out)!r},
+        ]))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=_python_env(), timeout=120
+    )
+    assert result.returncode == 130, result.stderr
+    summary = json.loads(result.stdout)
+    assert summary["interrupted"] is True
+    assert summary["records"] == 1
+    assert summary["skipped"] is None
+    assert len(_records(out)) == 1

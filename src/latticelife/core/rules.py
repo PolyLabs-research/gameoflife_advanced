@@ -158,6 +158,19 @@ class Rule:
         survive = {i for i in range(n + 1) if rng.random() < p_survive}
         return Rule(birth=birth, survive=survive)
 
+    def complement(self, n: int) -> Rule:
+        """The dual rule under swapping alive and dead, for a lattice of degree `n`: running
+        this rule on a grid and the complement rule on the complemented grid keeps the two grids
+        complementary for ever (checked by the test suite on every shape). A dead cell of the
+        complemented grid is a live cell here with `n - k` live neighbours, so it is born there
+        exactly when it dies here: `B' = {n - k : k not in S}`, and likewise
+        `S' = {n - k : k not in B}`. An involution; Conway's B3/S23 maps to AntiLife
+        B0123478/S01234678. Counts above `n` are dropped, as `to_bs_string` drops them."""
+        return Rule(
+            birth={n - k for k in range(n + 1) if k not in self.survive},
+            survive={n - k for k in range(n + 1) if k not in self.birth},
+        )
+
     def mutate(self, n: int, rate: float, rng: np.random.Generator) -> Rule:
         """Flip bits with probability `rate` for each neighbor count up to n."""
         birth = set(self.birth)
