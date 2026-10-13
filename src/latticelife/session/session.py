@@ -5,15 +5,22 @@ discovery evaluations) drive this one class. Zero pygame imports.
 Alerts are always evaluated and exposed (`alert`, and each record's `alert`); `auto_pause` only
 decides whether a sudden-death alert also pauses the session (§6.7). The interactive app keeps
 the default; headless batch runs pass `auto_pause=False` so every planned generation is recorded.
-Each crash pauses once. The condition compares against the population `sudden_death_window`
-generations back, so after a crash the pre-crash baselines stay in the window for a window of
-generations: the alert holds, or turns off and on again as a population left swinging across
-the threshold (a period-2 oscillator) crosses it, and pausing on each generation or each re-raise
-made every resume advance one or two generations. So a sudden-death alert reports a new crash,
-and may pause, only when the drop it measures starts at or after the generation of the last
-crash reported: its baseline is then a population from after that crash. A later crash pauses
-again, at least a window after the one before; restarting the window (an edit, a reset) forgets
-the crash reported before it, since every drop measured after the restart starts after it.
+Each crash pauses once, and so does each later one. The condition compares against the
+population `sudden_death_window` generations back, so after a crash the pre-crash baselines stay
+in the window for a window of generations: the alert holds, or turns off and on again as a
+population left swinging across the threshold (an oscillator) crosses it, and pausing on each
+generation or each re-raise made every resume advance one or two generations. So a sudden-death
+alert reports a new crash, and may pause, only when it is not the last crash reported measured
+again:
+- the drop it measures starts at or after that crash's generation (its baseline is a
+  population from after the crash), or
+- inside the crash's window, the population falls to a new low since the crash, and the fall
+  is a sudden-death drop from a level it has held for `HELD_GENERATIONS` generations in a row
+  since then: a regrowth that collapses again, or survivors dying out. The swings of an
+  oscillator the crash left behind do not count: they return to the same lows, and a high
+  phase shorter than `HELD_GENERATIONS` generations is no held level.
+Restarting the window (an edit, a reset) forgets the crash reported before it, since every drop
+measured after the restart starts after it.
 
 `paused` belongs to whoever set it last. An auto-pause is marked (`paused_by_alert`) until
 anything else sets `paused`; `reset()` keeps a pause the user chose, so generation 0 can be
@@ -55,6 +62,11 @@ from latticelife.session.metrics import (
     compute_grid_metrics,
     compute_lifeform_metrics,
 )
+
+# A further crash inside the last reported one's window falls from a level the population held
+# for this many generations in a row (see the module docstring): longer than any high phase of a
+# period-2 or period-3 oscillator.
+HELD_GENERATIONS = 3
 
 
 @dataclass(frozen=True)
@@ -234,6 +246,25 @@ class SimulationSession:
         # At most a window's worth of entries, read from the deque's end.
         return [self._alert_baseline, *(self.history_alive[i] for i in range(-horizon, 0))]
 
+    def _crashed_again(self, total_alive: int) -> bool:
+        """Whether this generation's `total_alive`, inside the window of the last crash reported,
+        is a crash of its own: a new low since that crash, and a sudden-death drop from a level
+        the population held for `HELD_GENERATIONS` generations in a row since it (the module
+        docstring says why both)."""
+        # The totals of the crash generation and of every one since, oldest first: fewer than a
+        # window of them, all still in history_alive (history_limit >= sudden_death_window).
+        since_crash = list(self.history_alive)[-(self.generation - self._reported_crash) :]
+        held_level = max(
+            (
+                min(since_crash[i : i + HELD_GENERATIONS])
+                for i in range(len(since_crash) - HELD_GENERATIONS + 1)
+            ),
+            default=0,
+        )
+        return total_alive < min(since_crash) and alerts_module.is_sudden_drop(
+            held_level, total_alive, self.config.alerts
+        )
+
     def step(self, force_clusters: bool = False) -> UpdateResult:
         # Growth baselines (§6.6 alive_i(t-1)) are read off the grid the step starts from, so
         # they are right after seeding, reset, set_cell or any other write to the grid.
@@ -267,12 +298,17 @@ class SimulationSession:
         )
         self.alert = alert
         # A new crash: the drop this alert measures (from `sudden_death_window` generations
-        # back) starts at or after the last crash reported, so it does not re-measure that one.
+        # back) starts at or after the last crash reported, so it does not re-measure that one,
+        # or the population has crashed again inside that crash's window.
         window_start = self.generation - self.config.alerts.sudden_death_window
         new_crash = (
             alert is not None
             and alert.kind is AlertKind.SUDDEN_DEATH
-            and (self._reported_crash is None or window_start >= self._reported_crash)
+            and (
+                self._reported_crash is None
+                or window_start >= self._reported_crash
+                or self._crashed_again(total_alive)
+            )
         )
         if new_crash:
             self._reported_crash = self.generation

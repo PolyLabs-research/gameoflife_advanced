@@ -34,6 +34,12 @@ class Alert:
     message: str
 
 
+def is_sudden_drop(prev_alive: int, current_alive: int, config: AlertsConfig) -> bool:
+    """Whether a fall from `prev_alive` to `current_alive` is a sudden-death drop: at least
+    `sudden_death_drop` of a population above zero."""
+    return prev_alive > 0 and (prev_alive - current_alive) / prev_alive >= config.sudden_death_drop
+
+
 def _sudden_death(
     alive_history: Sequence[int], current_alive: int, config: AlertsConfig, generation: int
 ) -> Alert | None:
@@ -41,10 +47,7 @@ def _sudden_death(
     if len(alive_history) < window:
         return None
     prev_alive = alive_history[-window]
-    if prev_alive <= 0:
-        return None
-    drop = prev_alive - current_alive
-    if drop / prev_alive >= config.sudden_death_drop:
+    if is_sudden_drop(prev_alive, current_alive, config):
         return Alert(
             AlertKind.SUDDEN_DEATH,
             f"Sudden death: gen {generation} drop {prev_alive}->{current_alive}",

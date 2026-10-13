@@ -456,9 +456,10 @@ def test_a_crash_that_leaves_an_oscillator_pauses_once():
     assert kinds[10:] == [None] * 4
 
 
-def test_a_further_collapse_pauses_once_its_drop_starts_after_the_reported_crash():
-    """A drop measured from a baseline after the reported crash is a new crash, even though
-    the alert has held since: it pauses a window after the first one, reported from there."""
+def test_survivors_of_a_crash_dying_out_pause_when_they_die():
+    """The crash leaves a still life of 4 that the dynamics then wipe out, while the alert has
+    held since the crash. Reported only once its drop was measured from after the crash, the
+    extinction paused a window after the crash; it now pauses when it happens."""
     config = _config(width=10, height=10, wrap=True, initial_alive_percentage=0.0, n_lifeforms=1)
     session = SimulationSession(config, [Lifeform(1, CONWAY)])
     window = config.alerts.sudden_death_window
@@ -468,11 +469,93 @@ def test_a_further_collapse_pauses_once_its_drop_starts_after_the_reported_crash
 
     assert _step_resuming(session, 5) == [1]
     session.grid.occupancy[:] = 0  # the dynamics then wipe it out
-    assert _step_resuming(session, window) == [window + 1]
+    assert _step_resuming(session, 2 * window) == [6]
 
     records = list(session.history_records)
-    assert all(record.alert.kind is AlertKind.SUDDEN_DEATH for record in records)
-    assert records[window].alert.message == f"Sudden death: gen {window + 1} drop 4->0"
+    assert all(record.alert.kind is AlertKind.SUDDEN_DEATH for record in records[:window])
+    assert records[5].alert.message == "Sudden death: gen 6 drop 1000->0"
+    assert all(record.alert is None for record in records[window + 5 :])
+
+
+def _scripted_session() -> SimulationSession:
+    """A session whose population the test writes before each step, standing in for the
+    dynamics: no cell is born and every cell survives, and the window before generation 1 held
+    1000 alive."""
+    config = _config(width=40, height=40, wrap=True, initial_alive_percentage=0.0, n_lifeforms=1)
+    session = SimulationSession(config, [Lifeform(1, Rule(birth=set(), survive=set(range(9))))])
+    session.history_alive.clear()
+    session.history_alive.extend([1000] * config.alerts.sudden_death_window)
+    return session
+
+
+def _step_through(session: SimulationSession, populations: list[int]) -> list[int]:
+    """Step once with each population on the grid, resuming after every auto-pause like
+    `_step_resuming`; the generations that paused."""
+    pauses = []
+    for alive in populations:
+        session.grid.occupancy[:] = 0
+        session.grid.occupancy[:alive] = 1
+        session.step()
+        if session.paused:
+            pauses.append(session.generation)
+            session.paused = False
+    return pauses
+
+
+def test_a_regrowth_that_crashes_again_inside_the_window_pauses_again():
+    """Round-3 regression of the pause-once rule: 1000 -> 150 pauses, the population regrows to
+    900 and crashes to 50 at generation 6. The alert showed that crash, measured from the 1000s,
+    but nothing paused: inside the first crash's window only drops measured from after it
+    counted, and once the window moved past it the baselines were the low post-crash totals."""
+    session = _scripted_session()
+
+    pauses = _step_through(session, [150, 150, 400, 900, 900, 50, 50, 50, 50, 50] + [200] * 7)
+
+    assert pauses == [1, 6]
+    assert session.history_records[5].alert.message == "Sudden death: gen 6 drop 1000->50"
+
+
+def test_a_regrowth_that_crashes_again_and_stays_down_pauses_when_it_crashes():
+    """The same second crash used to pause only at generation 13, measured from the 400."""
+    session = _scripted_session()
+
+    assert _step_through(session, [150, 150, 400, 900, 900] + [50] * 15) == [1, 6]
+
+
+def test_a_crash_measured_from_after_the_last_one_pauses_without_a_new_low():
+    """Regrown to 900 and held, a fall to 160 is no new low (the first crash left 150), but
+    once its drop is measured from the 900s it is a crash of its own."""
+    session = _scripted_session()
+
+    pauses = _step_through(session, [150] + [900] * 13 + [160] * 3)
+
+    assert pauses == [1, 15]
+    assert session.alert.message == "Sudden death: gen 17 drop 900->160"
+
+
+@pytest.mark.parametrize(
+    "swing",
+    [
+        [900, 40] * 4 + [900],
+        [900, 900, 900, 40] * 2 + [900],
+        [900, 36, 900, 32, 900, 28, 900, 24, 900],
+        [900, 900, 36, 900, 900, 32, 900, 900, 28],
+    ],
+    ids=["period-2", "period-4", "period-2-shrinking-lows", "period-3-shrinking-lows"],
+)
+def test_an_oscillator_swinging_past_the_threshold_after_a_crash_pauses_once(swing):
+    """Generations 2-10, the crash's window: each low is a sudden-death drop from the high
+    before it. Counted as new crashes, the swings would pause again and again, as the alert's
+    re-raises once did; but the lows return to the same level, or the highs last too briefly to
+    be a held level."""
+    session = _scripted_session()
+
+    pauses = _step_through(session, [40, *swing])
+
+    assert pauses == [1]
+    lows = [record for record in session.history_records if record.grid_metrics.total_alive < 50]
+    assert len(lows) == sum(alive < 50 for alive in [40, *swing])
+    assert all(record.alert.kind is AlertKind.SUDDEN_DEATH for record in lows)  # still reported
 
 
 def _single_window_config():
