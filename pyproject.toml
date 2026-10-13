@@ -3,16 +3,20 @@ name = "latticelife"
 version = "0.1.0"
 description = "LatticeLife — a lattice cellular automaton research platform. Geometry is data; one update rule."
 readme = "README.md"
-requires-python = ">=3.12"
+# Upper bound: the locked pygame 2.6.1 and moderngl 5.12.0 ship wheels for CPython 3.12/3.13 only;
+# on 3.14 they would build from source (needs SDL2 headers and a C toolchain). Lift it once
+# wheels exist.
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "numpy>=1.26",
     "pygame>=2.5",
 ]
 
 [project.optional-dependencies]
+# The 3D torus view (V key). Its matrices are plain numpy, so pyrr (unmaintained; it sets
+# ndarray.shape, which NumPy 2.5 deprecates) is no longer needed.
 torus = [
     "moderngl>=5.10",
-    "pyrr>=0.10.3",
 ]
 
 [project.scripts]
@@ -29,8 +33,38 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# The package, plus config/default.toml shipped inside it as latticelife/default.toml: an
+# installed (non-editable) copy has no checkout to find the default config in. A `sources`
+# rewrite rather than `force-include`, which would also drop a stray latticelife/default.toml
+# into site-packages on an editable install.
 [tool.hatch.build.targets.wheel]
-packages = ["src/latticelife"]
+only-include = ["src/latticelife", "config/default.toml"]
+sources = { "src" = "", "config" = "latticelife" }
+
+# An allowlist: by default the sdist takes every file the project .gitignore does not exclude,
+# which picked up local-only files ignored elsewhere (global git excludes, nested .gitignore
+# files) and anything else lying in the working tree. Docs, scripts and config are limited to
+# the file types they hold, and the excludes drop local files that can sit inside the allowed
+# directories too.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/config/*.toml",
+    "/docs/**/*.md",
+    "/scripts/**/*.py",
+    "/README.md",
+    "/pyproject.toml",
+    "/uv.lock",
+]
+exclude = [
+    "**/.claude",
+    "**/.hypothesis",
+    "**/.pytest_cache",
+    "**/.ruff_cache",
+    "**/__pycache__",
+    "**/.env",
+]
 
 [tool.ruff]
 line-length = 100

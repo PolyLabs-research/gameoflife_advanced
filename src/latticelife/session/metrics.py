@@ -92,33 +92,64 @@ def compute_lifeform_metrics(
     )
 
 
-def compute_cluster_metrics(grid: LatticeGrid, lifeform_id: int) -> ClusterMetrics:
-    """Connected components of `lifeform_id`'s cells via iterative min-label propagation over
-    the adjacency array (§6.6): initialize labels = cell index on the species mask, repeatedly
-    gather neighbor labels and take the elementwise min, until fixpoint. Geometry- and
-    wrap-correct by construction for every shape — no scipy.ndimage.
+def component_roots(adjacency: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """Connected components of the cells `cells` (flat indices) under `adjacency`, with every
+    adjacency entry treated as an undirected edge and edges to cells outside `cells` ignored.
+    Returns, for each position p in `cells`, the position of its component's representative
+    (the smallest position in that component), so equal values mean the same component.
+
+    Union-find on the edge list, vectorised (the §6.6 "union-find alternative"; the
+    Shiloach-Vishkin hook-and-shortcut scheme): every tree root linked by an edge to a tree with
+    a smaller root is hooked onto that root, then pointer jumping flattens every tree, and edges
+    found inside one tree are dropped for good. Plain min-label propagation needed one
+    full-grid pass per step along the longest path inside a cluster (seconds on a winding
+    500x500 cluster); this needs a handful of passes over the edges.
     """
-    mask = grid.occupancy == lifeform_id
-    if not np.any(mask):
+    k = cells.size
+    if k == 0:
+        return np.zeros(0, dtype=np.intp)
+    # Position of every cell in `cells`, -1 elsewhere; the extra last slot makes an adjacency
+    # pad of -1 read -1 too.
+    position = np.full(adjacency.shape[0] + 1, -1, dtype=np.intp)
+    position[cells] = np.arange(k)
+    neighbor_positions = position[adjacency[cells]]  # (k, degree)
+    linked = neighbor_positions >= 0
+    u = np.nonzero(linked)[0]
+    v = neighbor_positions[linked]
+
+    parent = np.arange(k)
+    while u.size:
+        root_u, root_v = parent[u], parent[v]  # every parent is a root after the shortcut
+        between = root_u != root_v
+        u, v = u[between], v[between]
+        if not u.size:
+            break
+        root_u, root_v = root_u[between], root_v[between]
+        # Hook the larger root onto the smaller. Several edges may hook one root; whichever
+        # write lands is fine, since every candidate is a smaller root of the same component.
+        parent[np.maximum(root_u, root_v)] = np.minimum(root_u, root_v)
+        while True:  # pointer jumping until every cell points straight at its root
+            grandparent = parent[parent]
+            if np.array_equal(grandparent, parent):
+                break
+            parent = grandparent
+    return parent
+
+
+def compute_cluster_metrics(grid: LatticeGrid, lifeform_id: int) -> ClusterMetrics:
+    """Connected components of `lifeform_id`'s cells over the grid's adjacency array (§6.6),
+    via `component_roots`. Geometry- and wrap-correct by construction for every shape (no
+    scipy.ndimage).
+    """
+    cells = np.flatnonzero(grid.occupancy == lifeform_id)
+    if cells.size == 0:
         return ClusterMetrics(cluster_count=0, avg_cluster_size=0.0, max_cluster_size=0)
 
-    n = grid.n_cells
-    infinity = np.iinfo(np.int64).max
-    labels = np.where(mask, np.arange(n, dtype=np.int64), infinity)
-
-    while True:
-        padded = np.append(labels, infinity)
-        gather_idx = np.where(grid.adjacency >= 0, grid.adjacency, n)
-        neighbor_labels = padded[gather_idx]  # (n, degree); unmasked/-1 slots read `infinity`
-        candidate = np.minimum(labels, neighbor_labels.min(axis=1))
-        candidate = np.where(mask, candidate, infinity)
-        if np.array_equal(candidate, labels):
-            break
-        labels = candidate
-
-    _, counts = np.unique(labels[mask], return_counts=True)
+    roots = component_roots(grid.adjacency, cells)
+    sizes = np.bincount(roots)
+    sizes = sizes[sizes > 0]
     return ClusterMetrics(
-        cluster_count=len(counts),
-        avg_cluster_size=float(counts.mean()),
-        max_cluster_size=int(counts.max()),
+        cluster_count=len(sizes),
+        avg_cluster_size=float(sizes.mean()),
+        max_cluster_size=int(sizes.max()),
     )

@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from latticelife.config import load_config
 from latticelife.core.lifeform import Lifeform
@@ -20,17 +21,26 @@ def _config(**overrides):
     return replace(
         base,
         grid=replace(base.grid, **grid_overrides),
-        simulation=replace(base.simulation, n_lifeforms=1, **sim_overrides),
+        simulation=replace(base.simulation, **{"n_lifeforms": 1, **sim_overrides}),
     )
 
 
 def test_run_timeseries_rho_matches_occupancy_and_activity_is_its_delta():
-    config = _config(width=10, height=10, wrap=True)
-    session = SimulationSession(config, [Lifeform(1, CONWAY)])
+    """F64: rho must be the tracked species' share of all cells. Two species on a non-square
+    grid, so counting every species or dividing by the width would both be caught."""
+    config = _config(width=12, height=10, wrap=True, n_lifeforms=2)
+    lifeforms = [Lifeform(1, CONWAY), Lifeform(2, Rule(birth={3, 6}, survive={2, 3}))]
+    session = SimulationSession(config, lifeforms, seed=11)
+    twin = SimulationSession(config, lifeforms, seed=11)
 
     result = run_timeseries(session, lifeform_id=1, steps=20)
 
-    assert len(result.rho) == 20
+    expected = [np.count_nonzero(twin.grid.occupancy == 1) / 120]
+    for _ in range(1, 20):
+        twin.step()
+        assert np.count_nonzero(twin.grid.occupancy == 2) > 0  # the other species is present
+        expected.append(np.count_nonzero(twin.grid.occupancy == 1) / 120)
+    assert result.rho.tolist() == expected
     assert len(result.activity) == 20
     assert result.activity[0] == 0.0  # legacy never measures activity at step 0
     for i in range(1, 20):
@@ -79,3 +89,35 @@ def test_run_damage_spreading_is_deterministic_given_same_rng_seed():
     h_a = run()
     h_b = run()
     assert np.array_equal(h_a, h_b)
+
+
+def test_unperturbed_multi_species_twins_never_diverge():
+    """F23: the twins used independent RNG streams, so with two species the birth tie-breaks
+    differed and unperturbed twins drifted to H ~ 0.26 by step 50. Common random numbers keep
+    them identical."""
+    config = _config(width=32, height=32, wrap=True, n_lifeforms=2, initial_alive_percentage=0.5)
+    lifeforms = [Lifeform(1, CONWAY), Lifeform(2, CONWAY)]
+    session = SimulationSession(config, lifeforms, seed=7)
+
+    h = run_damage_spreading(session, steps=50, rng=np.random.default_rng(3), flip_cells=0)
+
+    assert np.count_nonzero(session.grid.occupancy == 2) > 0
+    assert not h.any()
+
+
+def test_perturbed_multi_species_twins_differ_only_by_the_perturbation():
+    config = _config(width=32, height=32, wrap=True, n_lifeforms=2, initial_alive_percentage=0.5)
+    lifeforms = [Lifeform(1, CONWAY), Lifeform(2, CONWAY)]
+    session = SimulationSession(config, lifeforms, seed=7)
+
+    h = run_damage_spreading(session, steps=50, rng=np.random.default_rng(3), flip_cells=1)
+
+    assert h[0] == 1 / (32 * 32)
+    assert h.max() < 0.25  # one flipped cell's damage, not tie-break noise across the grid
+
+
+def test_damage_spreading_needs_a_species():
+    config = _config(width=10, height=10, wrap=True)
+    session = SimulationSession(config, [])
+    with pytest.raises(ValueError, match="at least one species"):
+        run_damage_spreading(session, steps=5, rng=np.random.default_rng(0))

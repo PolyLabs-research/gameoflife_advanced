@@ -22,6 +22,26 @@ for the first time in this rebuild — the legacy `square_grid.py` hardcoded tor
 Symmetry invariant, property-tested per shape and both wrap modes: for all `i, j`,
 `j ∈ N(i) ⇔ i ∈ N(j)`.
 
+## Sizes that can wrap
+
+`validate_dimensions(shape, width, height, wrap, triangle_mode)` rejects (ValueError) any size
+whose wrapped adjacency would be wrong; `build_adjacency` calls it, and so do config loading and
+the settings panel's Apply. Odd sizes are refused, never rounded.
+
+- Hex offsets depend on column parity and triangle orientation on (row + column) parity, so a
+  wrapped hexagon grid needs an even width and a wrapped triangle grid an even width and height.
+  With an odd size the seam joins cells of the same parity: one-way links (breaking symmetry),
+  or, for edge-mode triangles, two same-orientation triangles counted as edge neighbours.
+- Along each axis a wrapped grid must be larger than the stencil's span (offsets plus the cell
+  itself), or modulo indexing folds two offsets onto one cell: a cell becomes its own neighbour
+  or one neighbour is counted twice. Minimum wrapped sizes (width x height, from
+  `min_wrap_size`): square 3 x 3, hexagon 4 x 3, triangle edge 4 x 2, triangle edge+vertex 6 x 4.
+- Clamped (`wrap=False`) grids accept any size of at least 1 x 1.
+
+A test sweeps every size up to 12 x 12 per shape and checks the rejected sizes are exactly the
+ones whose unvalidated adjacency has a self-neighbour, a repeated neighbour, a one-way link or a
+same-orientation triangle edge.
+
 ## Legacy baseline (carried over from `DEV_NOTES.md`, for reference)
 
 - Neighbor counts:
@@ -46,7 +66,9 @@ Symmetry invariant, property-tested per shape and both wrap modes: for all `i, j
 
 Generalizes the legacy hex/tri gather to every shape: pad the flat grid with one sentinel slot,
 remap `-1` adjacency indices to the sentinel, `padded[adjacency]` then reduce. `convolve2d` and
-scipy are gone (§6.1). Connected-component clustering (§6.6) reuses the same adjacency array via
-iterative min-label propagation, so it is geometry-correct and wrap-correct by construction for
-all three shapes — `scipy.ndimage` is not used since its 4/8-connectivity has no hex/tri notion
-and no torus support.
+scipy are gone (§6.1). Connected-component clustering (§6.6) reuses the same adjacency array, as
+the edge list of a vectorised union-find (`session.metrics.component_roots`: hook roots, then
+pointer-jump), so it is geometry-correct and wrap-correct by construction for all three shapes —
+`scipy.ndimage` is not used since its 4/8-connectivity has no hex/tri notion and no torus
+support. Union-find replaced the spec's min-label propagation, which needed one full-grid pass
+per cell along a cluster's longest internal path (seconds per call on large winding clusters).
