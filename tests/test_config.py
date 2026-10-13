@@ -1,4 +1,5 @@
 import copy
+import math
 import tomllib
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from latticelife.config import (
     project_root_for,
     user_data_dir,
 )
+from latticelife.discovery import es
 
 REPO_DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config" / "default.toml"
 
@@ -165,6 +167,18 @@ def test_an_integer_for_a_float_setting_loads_as_a_float(tmp_path):
     assert type(config.alerts.stasis_volatility) is float
     assert config.alerts.stasis_volatility == 1.0
     assert type(config.grid.width) is int
+
+
+def test_negative_zero_for_a_float_setting_loads_as_zero(tmp_path):
+    """`low = -0.0` equals `low = 0.0` but json-serialised as "-0.0", forking the lineage."""
+    data = _with(_default_data(), "criticality.alive_band.low", -0.0)
+    config = load_config(_write_config(tmp_path, data))
+    assert math.copysign(1.0, config.criticality.alive_band.low) == 1.0
+    default = load_config(DEFAULT_CONFIG_PATH)
+    for shape in ("square", "hexagon", "triangle"):
+        assert es.checkpoint_name(es.search_settings(config, shape)) == es.checkpoint_name(
+            es.search_settings(default, shape)
+        )
 
 
 def test_an_integer_beyond_float_range_is_rejected_naming_the_key(tmp_path):

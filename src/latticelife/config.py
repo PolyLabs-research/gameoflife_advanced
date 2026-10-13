@@ -261,8 +261,9 @@ _TYPE_NAMES = {"bool": "true or false", "int": "an integer", "float": "a number"
 def _build(cls: type, table: Any, name: str) -> Any:
     """Construct dataclass `cls` from TOML table `name`, rejecting missing/unknown keys and
     values of the wrong type. A float setting written as an integer (`low = 0`) is stored as a
-    float, so nothing downstream can tell it from `low = 0.0` — a discovery lineage's
-    fingerprint (`es.search_settings`) once did, and started a fresh lineage for it."""
+    float, and `-0.0` as `0.0`, so nothing downstream can tell them from `low = 0.0` — a
+    discovery lineage's fingerprint (`es.search_settings`) once did, and started a fresh lineage
+    for each spelling."""
     if not isinstance(table, dict):
         raise ConfigError(f"[{name}] must be a table")
     values = dict(table)
@@ -288,6 +289,8 @@ def _build(cls: type, table: Any, name: str) -> Any:
                 raise ConfigError(
                     f"{name}.{key} must be a number within float range (got {values[key]!r})"
                 ) from None
+        if annotation == "float" and values[key] == 0:
+            values[key] = 0.0  # -0.0 equals 0.0 but serialises, and fingerprints, as "-0.0"
     return cls(**values)
 
 

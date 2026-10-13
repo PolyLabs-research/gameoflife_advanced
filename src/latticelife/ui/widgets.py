@@ -221,11 +221,25 @@ class TextInput(_FocusableInput):
         if self.on_commit is not None:
             self.on_commit(self.text)
 
+    def fitted_text(self, rect: pygame.Rect) -> str:
+        """The text an unfocused field shows in `rect`: all of it if it fits, else a prefix cut
+        back to whole comma-separated items and marked "...". Clipping alone could end on a whole
+        digit, so "0,1,2,5,7,12" read as the valid, different rule "0,1,2,5,7,1"."""
+        room = rect.width - 2 * TEXT_PADDING - 2
+        if self.active or self.font.size(self.text)[0] <= room:
+            return self.text
+        shown = self.text
+        while shown and self.font.size(shown + "...")[0] > room:
+            shown = shown[:-1]
+        if "," in self.text:
+            shown = shown[: shown.rfind(",") + 1]
+        return shown + "..."
+
     def draw(self, surface: pygame.Surface, rect: pygame.Rect) -> None:
         self.rect = rect
         self._draw_box(surface, rect, radius=4)
         if self.text or self.composition:
-            label = self.font.render(self.text, True, TEXT_COLOR)
+            label = self.font.render(self.fitted_text(rect), True, TEXT_COLOR)
         else:
             label = self.font.render(self.placeholder, True, PLACEHOLDER_COLOR)
         self._draw_text(surface, rect, label, centered=False)

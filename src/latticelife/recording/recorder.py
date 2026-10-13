@@ -262,6 +262,17 @@ class Recorder:
                 f"{'; other objects: ' + ', '.join(others) if others else ''}); "
                 "refusing to modify it. Record into a new file instead (autorun --db)."
             )
+        # The user's own views and indexes are fine, but not under a v2 table's name: CREATE
+        # TABLE IF NOT EXISTS would then fail on it, or skip the table and write into the view.
+        clashing = sorted(
+            f"{kind} {name}" for kind, name in objects if kind != "table" and name in v2_tables
+        )
+        if clashing:
+            raise RecorderSchemaError(
+                f"{self.db_path}: {', '.join(clashing)} takes the name of a schema "
+                f"v{SCHEMA_VERSION} table; refusing to modify it. Record into a new file instead "
+                "(autorun --db)."
+            )
         for table, expected in _schema_columns().items():
             if table not in tables:
                 continue

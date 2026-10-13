@@ -156,6 +156,24 @@ def test_long_text_is_clipped_to_its_box(font):
         assert np.all(right == (1, 2, 3))
 
 
+@pytest.mark.parametrize(
+    "text", ["0,1,2,5,7,12", "1,2,3,4,5,6,7,8", "0,1,2,3,4,5,6,7,8,9,10,11,12"]
+)
+def test_an_unfocused_overflowing_rule_shows_whole_counts_then_an_ellipsis(font, text):
+    """Clipping alone cut "0,1,2,5,7,12" to "0,1,2,5,7,1": a different, valid rule."""
+    field = TextInput(text, font)
+    rect = pygame.Rect(10, 10, 60, 28)
+    shown = field.fitted_text(rect)
+    assert shown.endswith("...")
+    kept = shown.removesuffix("...")
+    assert text.startswith(kept) and (kept == "" or kept.endswith(","))
+    assert font.size(shown)[0] <= rect.width - 2 * widgets.TEXT_PADDING - 2
+    field.active = True
+    assert field.fitted_text(rect) == text  # focused: the whole text, scrolled to its end
+    field.active = False
+    assert field.fitted_text(pygame.Rect(0, 0, 400, 28)) == text  # fits: unchanged
+
+
 def test_numeric_input_clamps_its_starting_value(font):
     """F49: a count of 12 showed as 12 while Apply would make it 10."""
     assert NumericInput(12, 1, 10, font).text == "10"

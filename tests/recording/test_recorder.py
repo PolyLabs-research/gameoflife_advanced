@@ -298,6 +298,33 @@ def test_user_version_2_alone_does_not_make_a_db_ours(tmp_path, ddl, message):
     assert db_path.read_bytes() == before_bytes
     assert _db_state(db_path) == before
     assert _journal_mode(db_path) == "delete"
+
+
+@pytest.mark.parametrize(
+    "ddl",
+    [
+        "CREATE INDEX life_records ON generation_metrics(total_alive);",
+        "CREATE VIEW life_records AS SELECT * FROM generation_metrics;",
+    ],
+    ids=["index", "view"],
+)
+def test_a_view_or_index_named_like_a_v2_table_is_refused_unchanged(tmp_path, ddl):
+    """It passed the schema check: the file went to WAL, then CREATE TABLE IF NOT EXISTS failed
+    on the index (traceback), or skipped the table and the first flush wrote into the view."""
+    db_path = tmp_path / "clash.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(f"{_V2_GENERATION_METRICS} {ddl} PRAGMA user_version = 2;")
+    conn.close()
+    before = _db_state(db_path)
+    before_bytes = db_path.read_bytes()
+
+    with pytest.raises(RecorderSchemaError, match=r"life_records takes the name of a schema v2"):
+        with Recorder(db_path):
+            pass
+
+    assert db_path.read_bytes() == before_bytes
+    assert _db_state(db_path) == before
+    assert _journal_mode(db_path) == "delete"
     assert not Path(f"{db_path}-wal").exists()
 
 
