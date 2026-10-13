@@ -14,7 +14,13 @@ See `latticelife_rebuild_spec_v1.0.md` (in the legacy repo) for the full rebuild
 uv run python -m latticelife.cli ui                                    # interactive pygame app
 uv run python -m latticelife.cli autorun --sessions 10 --generations 200 --shape random
 uv run python -m latticelife.cli discover --minutes 30                 # (mu+lambda) rule search
+uv run python -m latticelife.cli census --shape hexagon --rules dual   # every rule's exact fate
+uv run python -m latticelife.cli sweep --shape hexagon --rule B2/S34 --grid 16 32 64
+uv run python -m latticelife.cli soup --shape hexagon --rule B2/S34    # objects soups leave
 ```
+
+`census`, `sweep` and `soup` are the mathematics experiments: exact periods, phase diagrams and
+object catalogues per lattice, written as JSONL and resumable. See `docs/experiments.md`.
 
 3D torus rendering (the `V` key in `ui`) needs the optional extra: `uv sync --extra torus`.
 

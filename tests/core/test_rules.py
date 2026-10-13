@@ -230,3 +230,43 @@ def test_parse_count_list_reads_leading_zeros_and_shortens_echoed_text():
         parse_count_list("0009", max_count=8)
     with pytest.raises(ValueError, match=r"^no neighbour counts in ',,,,,…,,,,,'$"):
         parse_count_list("," * 40, max_count=8)
+
+
+# --- complement duality -----------------------------------------------------------------------
+
+
+def test_complement_of_life_is_antilife_and_an_involution():
+    life = Rule(birth={3}, survive={2, 3})
+    anti = life.complement(8)
+    assert anti.to_bs_string(8) == "B0123478/S01234678"
+    assert anti.complement(8) == life
+
+
+@pytest.mark.parametrize(
+    ("shape", "triangle_mode"),
+    [
+        ("square", "edge+vertex"),
+        ("hexagon", "edge+vertex"),
+        ("triangle", "edge"),
+        ("triangle", "edge+vertex"),
+    ],
+)
+def test_complement_rule_on_the_complemented_grid_stays_complementary(shape, triangle_mode):
+    """The duality the rule census halves its work with: it must hold cell for cell, on every
+    lattice, for as long as the two grids run."""
+    from latticelife.core.geometries import max_degree
+    from latticelife.core.lattice import LatticeGrid
+    from latticelife.core.lifeform import Lifeform
+
+    n = max_degree(shape, triangle_mode)
+    rng = np.random.default_rng(3)
+    rule = Rule.random(n, 0.4, 0.4, rng)
+    dual = rule.complement(n)
+    grid = LatticeGrid([Lifeform(1, rule)], shape, 12, 10, True, triangle_mode)
+    twin = LatticeGrid([Lifeform(1, dual)], shape, 12, 10, True, triangle_mode)
+    grid.occupancy[:] = (rng.random(grid.n_cells) < 0.5).astype(np.int8)
+    twin.occupancy[:] = 1 - grid.occupancy
+    for _ in range(10):
+        grid.step(rng)
+        twin.step(rng)
+        assert np.array_equal(twin.occupancy, 1 - grid.occupancy)
