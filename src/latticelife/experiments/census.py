@@ -150,6 +150,7 @@ class RuleRecord:
     rho_min: float  # over the same window
     rho_max: float
     activity_final: float  # mean |delta rho| over the same window
+    changed_final: float  # mean fraction of cells that changed per step, over the same window
     cluster_count: int  # connected components of live cells at the end
     max_cluster_size: int
     langton_lambda: float
@@ -176,11 +177,23 @@ def classify_session(session: SimulationSession, steps: int, tail: int = 50) -> 
     """Run `session` (one species) for `steps` generations with cycle detection and measure its
     terminal behaviour: the outcome, period and transient, the density and activity over the
     last `tail` generations, and the connected components of live cells at the end (on the
-    cycle, when one was found). A window longer than the run is the whole run."""
+    cycle, when one was found). A window longer than the run is the whole run.
+
+    `changed_final`, the fraction of cells changing per step, tells a chaotic rule whose density
+    hardly moves from a quiet one; |delta rho| cannot. It is read from the session's own
+    history, the generations actually stepped (so, once a cycle is found, the ones leading on
+    to it), over at most `tail` of them and never more than the session keeps
+    (`simulation.history_limit`)."""
     if tail < 1:
         raise ValueError(f"tail must be at least 1 (got {tail})")
     series = run_timeseries(session, lifeform_id=1, steps=steps, detect_cycles=True)
     window = series.rho[-tail:]
+    stepped = list(session.history_records)[-tail:]
+    changed_final = (
+        float(sum(r.result.changed_cells for r in stepped) / (len(stepped) * session.grid.n_cells))
+        if stepped
+        else 0.0
+    )
     rho_final = float(window.mean())
     if rho_final == 0.0:
         outcome = "extinct"
@@ -200,6 +213,7 @@ def classify_session(session: SimulationSession, steps: int, tail: int = 50) -> 
         "rho_min": float(window.min()),
         "rho_max": float(window.max()),
         "activity_final": float(series.activity[-tail:].mean()),
+        "changed_final": changed_final,
         "cluster_count": clusters.cluster_count,
         "max_cluster_size": clusters.max_cluster_size,
     }

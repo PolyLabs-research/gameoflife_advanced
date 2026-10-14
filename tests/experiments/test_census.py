@@ -102,6 +102,7 @@ def test_classify_session_outcomes(config):
 
     block = classify_session(session_with([(4, 4), (4, 5), (5, 4), (5, 5)]), steps=20, tail=5)
     assert block["outcome"] == "fixed"
+    assert block["changed_final"] == 0.0
     assert (block["period"], block["transient"]) == (1, 0)
     assert (block["rho_final"], block["cluster_count"], block["max_cluster_size"]) == (0.04, 1, 4)
 
@@ -109,6 +110,7 @@ def test_classify_session_outcomes(config):
     assert blinker["outcome"] == "periodic"
     assert (blinker["period"], blinker["transient"]) == (2, 0)
     assert blinker["activity_final"] == 0.0  # same population in both phases
+    assert blinker["changed_final"] == 0.04  # yet 4 of 100 cells change every step
 
     # Three cells in an L: one step of transient into a block.
     corner = classify_session(session_with([(4, 4), (4, 5), (5, 4)]), steps=20, tail=5)
