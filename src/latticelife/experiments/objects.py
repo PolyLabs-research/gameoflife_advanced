@@ -144,14 +144,19 @@ def _own_torus(
 
 
 def _fits(translations: TorusTranslations, cells: np.ndarray) -> bool:
-    """Whether `cells` lie within a window smaller than half the torus each way, read from the
-    first cell: then they do not reach round the torus to touch themselves."""
+    """Whether `cells` lie within a window smaller than half the torus each way from every cell,
+    so they cannot reach round the torus to touch themselves and `pattern_key` can name them
+    from any anchor. The window is read from the first cell. On hexagons, moving a pattern by an
+    odd number of columns (as `pattern_key` does to anchor it at another cell) shifts its odd
+    columns one row against its even ones, so a row span one short of half the torus from one
+    cell can be half the torus from another: there the row span must stay one row shorter."""
     width, height = translations.width, translations.height
     rows = (cells // width - cells[0] // width) % height
     cols = (cells % width - cells[0] % width) % width
     rows = np.where(rows > height // 2, rows - height, rows)
     cols = np.where(cols > width // 2, cols - width, cols)
-    return bool(rows.max() - rows.min() < height // 2 and cols.max() - cols.min() < width // 2)
+    row_limit = height // 2 - (1 if translations.shape == "hexagon" else 0)
+    return bool(rows.max() - rows.min() < row_limit and cols.max() - cols.min() < width // 2)
 
 
 def identify(
@@ -350,47 +355,57 @@ def _as_key(cells: Iterable[Iterable[int]]) -> PatternKey:
 
 def catalogue(records: Iterable[dict], up_to_symmetry: bool = False) -> list[dict]:
     """The objects seen across soup records, most common first: one entry per distinct object
-    with its kind, period, displacement, population, how many times it appeared (`count`) and
-    under how many distinct rules (`rules`). An object is its key and its behaviour (kind, period
-    and displacement), since one pattern can be a still life under one rule and oscillate under
-    another. With `up_to_symmetry`, objects are merged under rotation and reflection by their
-    canonical key, which a record written before canonical keys were recorded gets by
-    re-identifying the object under its rule (once per rule and key)."""
+    with its kind, period, displacement, population, rule range when recorded, how many times it
+    appeared (`count`) and under how many distinct rules (`rules`).
+
+    An entry is one orbit. Up to translation that is the key, the behaviour (kind, period and
+    displacement: one pattern can be a still life under one rule and oscillate under another) and
+    the rule range when the records carry it. With `up_to_symmetry` it is the canonical key and
+    the rule range: the same phase shapes can belong to different orbits under different rules,
+    and two orbits through the same phase part ways at a transition one makes and the other
+    does not, so their ranges differ. Records written before canonical keys and rule ranges were
+    recorded get them by re-identifying the object under its rule (once per rule and key)."""
     counts: Counter[tuple] = Counter()
     rules: dict[tuple, set[str]] = {}
     details: dict[tuple, dict] = {}
-    recomputed: dict[tuple, PatternKey] = {}
+    recomputed: dict[tuple, ObjectRecord] = {}
     for record in records:
         for found in record["objects"]:
             if not up_to_symmetry:
-                identity = _as_key(found["key"])
-            elif "canonical_key" in found:
-                identity = _as_key(found["canonical_key"])
+                identity = (_as_key(found["key"]), found.get("rule_min"), found.get("rule_max"))
+                rule_range = found
+            elif "canonical_key" in found and "rule_min" in found:
+                identity = (_as_key(found["canonical_key"]), found["rule_min"], found["rule_max"])
+                rule_range = found
             else:
                 cache_key = (record["rule"], _as_key(found["key"]))
                 if cache_key not in recomputed:
-                    shape = record["shape"]
                     again = identify(
                         _as_key(found["key"]),
                         Rule.from_bs_string(record["rule"]),
-                        shape,
+                        record["shape"],
                         record.get("triangle_mode") or "edge+vertex",
                         max_period=int(found["period"]),
                     )
                     assert isinstance(again, ObjectRecord), (cache_key, again)
-                    recomputed[cache_key] = again.canonical_key
-                identity = recomputed[cache_key]
+                    recomputed[cache_key] = again
+                again = recomputed[cache_key]
+                identity = (again.canonical_key, again.rule_min, again.rule_max)
+                rule_range = again.to_json()
             entry = (identity, found["kind"], found["period"], tuple(found["displacement"]))
             counts[entry] += 1
             rules.setdefault(entry, set()).add(record["rule"])
             details.setdefault(
                 entry,
                 {
-                    "key": [list(cell) for cell in identity],
+                    "key": [list(cell) for cell in identity[0]],
                     "kind": found["kind"],
                     "period": found["period"],
                     "displacement": found["displacement"],
                     "population": found["population"],
+                    "rule_min": rule_range.get("rule_min"),
+                    "rule_max": rule_range.get("rule_max"),
+                    "rule_count": rule_range.get("rule_count"),
                 },
             )
     return [

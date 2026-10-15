@@ -112,7 +112,7 @@ object found, and how many components were not objects, by reason.
 | `spaceship`  | returns displaced: speed is `displacement` per `period`   |
 | `died`       | nothing left                                              |
 | `unsettled`  | no repeat within `--max-period` generations               |
-| `too_large`  | grew to span half its torus (self-interaction across the seam); a larger `--margin` gives more room |
+| `too_large`  | grew to span half its torus (self-interaction across the seam), less one row on hexagons; a larger `--margin` gives more room |
 
 An object's `key` names it up to translation: the cells of its fewest-cell phase relative to one
 of them, the smallest such list over every choice of anchor (ties between phases go to the
@@ -140,8 +140,11 @@ B23456/S23456.
 The summary lists the ten most common objects up to symmetry over every record in the file for
 that rule and torus size, with both distinct counts. `objects.catalogue(records)` lists every
 object up to translation and `objects.catalogue(records, up_to_symmetry=True)` up to symmetry;
-an entry is one pattern with one behaviour (a domino is a still life under some rules and
-oscillates under others), with `count` sightings under `rules` distinct rules. Records written
+an entry is one orbit, with `count` sightings under `rules` distinct rules. Up to translation
+that is the key with its behaviour (a domino is a still life under some rules and oscillates
+under others) and its rule range; up to symmetry it is the canonical key with the rule range,
+since the same phase shapes can belong to different orbits under different rules, whose ranges
+differ. Records written
 before canonical keys were recorded are re-identified once per rule and key to recover theirs:
 
 ```python

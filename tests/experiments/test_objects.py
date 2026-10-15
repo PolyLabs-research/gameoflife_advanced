@@ -227,7 +227,19 @@ def test_soup_objects_and_run_soups_record_and_resume(tmp_path):
 
     listed = catalogue(read_jsonl(out))
     assert all(
-        set(entry) == {"key", "kind", "period", "displacement", "population", "count", "rules"}
+        set(entry)
+        == {
+            "key",
+            "kind",
+            "period",
+            "displacement",
+            "population",
+            "rule_min",
+            "rule_max",
+            "rule_count",
+            "count",
+            "rules",
+        }
         for entry in listed
     )
     assert len(catalogue(read_jsonl(out), up_to_symmetry=True)) <= len(listed)
@@ -307,7 +319,10 @@ def test_catalogue_up_to_symmetry_merges_orientations_including_old_records():
         identify(key, b2, "hexagon").to_json()
         for key in [((-1, 0), (0, 0)), ((-1, -1), (0, 0)), ((-1, 1), (0, 0))]
     ]
-    old = [{k: v for k, v in o.items() if k not in ("canonical_key",)} for o in objects]
+    old = [
+        {k: v for k, v in o.items() if k not in ("canonical_key", "rule_min", "rule_max")}
+        for o in objects
+    ]
     for records in (
         [{"rule": "B2/S", "shape": "hexagon", "objects": objects}],
         [{"rule": "B2/S", "shape": "hexagon", "triangle_mode": None, "objects": old}],
@@ -318,6 +333,7 @@ def test_catalogue_up_to_symmetry_merges_orientations_including_old_records():
         assert [(e["kind"], e["period"], e["count"], e["rules"]) for e in merged] == [
             ("oscillator", 2, 3, 1)
         ]
+        assert (merged[0]["rule_min"], merged[0]["rule_count"]) == ("B2/S", 512)
 
 
 def test_catalogue_keeps_one_pattern_apart_when_it_behaves_differently_under_two_rules():
@@ -332,3 +348,22 @@ def test_catalogue_keeps_one_pattern_apart_when_it_behaves_differently_under_two
         ("oscillator", 1),
         ("still", 1),
     ]
+
+
+def test_a_hexagon_object_near_half_its_torus_never_crashes_the_naming():
+    """A period-29 oscillator under B25/S26 grows to a phase whose row span is one short of half
+    its torus from its first cell but half the torus from a cell in an odd column, where
+    pattern_key re-anchors it: identify raised AssertionError (1 call in 1,024,000 of an
+    exhaustive small-seed search). It now reports too_large there, and names the object on a
+    roomier torus."""
+    seed = ((-5, 3), (-3, 2), (-2, 1), (0, 0))  # four cells, each two steps from the next
+    rule = Rule(birth={2, 5}, survive={2, 6})
+    assert identify(seed, rule, "hexagon", margin=8) == "too_large"
+    found = identify(seed, rule, "hexagon", margin=10)
+    assert (found.kind, found.period, found.population, found.max_population) == (
+        "oscillator",
+        29,
+        6,
+        30,
+    )
+    assert (found.rule_min, found.rule_max, found.rule_count) == ("B25/S26", "B25/S26", 1)
