@@ -303,7 +303,10 @@ def _refine_cycle(x, period, step, slope, orbit, exact) -> tuple[list[float], fl
             points = points[:divisor]
             break
     multiplier = multiplier_of(points)
-    if abs(multiplier - 1.0) < 1e-2:
+    # Snap only an orbit still creeping: one that already closes exactly sits on a cycle of
+    # its own, as every density does for B0123456/S, whose map is 1 - x (a continuum of
+    # neutral 2-cycles {x, 1 - x}, not the 0-1 strobe).
+    if abs(multiplier - 1.0) < 1e-2 and orbit[len(points)] != x:
         drift = step(x) - x
         if len(points) == 1 and exact:
             if drift > 0:

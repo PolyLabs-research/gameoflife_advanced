@@ -289,3 +289,11 @@ def test_mean_field_lyapunov_of_a_strongly_attracting_point_is_exact():
     assert mean_field_orbit(Rule.from_bs_string("B25/S06"), 6, 0.5)["lyapunov"] == pytest.approx(
         -9.856, abs=1e-3
     )
+
+
+def test_an_orbit_already_on_a_neutral_cycle_is_not_snapped_onto_another():
+    """B0123456/S maps x to 1 - x: from 0.1 the orbit is exactly the neutral 2-cycle
+    {0.1, 0.9}, not the 0-1 strobe it used to be snapped onto."""
+    orbit = mean_field_orbit(Rule.from_bs_string("B0123456/S"), 6, 0.1)
+    assert (orbit["period"], orbit["values"]) == (2, [0.1, 0.9])
+    assert mean_field_orbit(Rule.from_bs_string("B014/S"), 6, 0.1)["values"] == [0.0, 1.0]
