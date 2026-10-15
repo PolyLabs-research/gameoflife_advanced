@@ -137,6 +137,7 @@ def test_identify_names_life_objects():
     # Both phases name the same object.
     vertical = identify(_key([(0, 0), (1, 0), (2, 0)]), LIFE, "square")
     assert vertical == blinker
+    assert len(blinker.key) == blinker.population
 
     glider = identify(_key(GLIDER), LIFE, "square")
     assert (glider.kind, glider.period, glider.displacement) == ("spaceship", 4, (1, 1))
@@ -144,6 +145,7 @@ def test_identify_names_life_objects():
     assert identify(_key(GLIDER), LIFE, "square", margin=12) == glider  # torus-independent
 
     pulsar = identify(_key(PULSAR, size=40), LIFE, "square")  # 13 wide: needs a torus over 26
+    assert len(pulsar.key) == pulsar.population == 48  # the key is the smallest phase
     assert (pulsar.kind, pulsar.period, pulsar.population, pulsar.max_population) == (
         "oscillator",
         3,

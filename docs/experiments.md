@@ -58,7 +58,10 @@ cycle detection and classified.
 A torus-level period is the least common multiple of everything on the torus: two blinkers and
 a period-3 oscillator give 6, and a spaceship adds the time it takes to come round the torus.
 Fields: `rho_final`, `rho_min`, `rho_max`, `activity_final` are over the last `--tail`
-generations (of the periodically extended series when a cycle was found); `cluster_count` and
+generations (of the periodically extended series when a cycle was found); `changed_final` is the
+fraction of cells changing per step over the last stepped generations, which tells a chaotic
+rule with a steady density from a quiet one, as `activity_final` (|delta rho|) cannot;
+`cluster_count` and
 `max_cluster_size` are the connected components of live cells at the end; `frozen_at` is the
 runner's density-based freeze detection, kept for comparison with discovery.
 

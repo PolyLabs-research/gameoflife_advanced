@@ -190,12 +190,15 @@ def identify(
         kind = "still"
     else:
         kind = "oscillator"
+    # The key is the smallest phase (fewest cells; the smallest cell list among equals), so
+    # `population` is the key's own cell count.
+    smallest = min(range(period), key=lambda i: (populations[i], phases[i]))
     return ObjectRecord(
-        key=min(phases),
+        key=phases[smallest],
         kind=kind,
         period=period,
         displacement=displacement,
-        population=min(populations),
+        population=populations[smallest],
         max_population=max(populations),
     )
 
