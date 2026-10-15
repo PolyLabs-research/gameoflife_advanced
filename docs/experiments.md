@@ -65,12 +65,20 @@ rule with a steady density from a quiet one, as `activity_final` (|delta rho|) c
 `max_cluster_size` are the connected components of live cells at the end; `frozen_at` is the
 runner's density-based freeze detection, kept for comparison with discovery.
 
-Two quantities come from the rule alone. `langton_lambda` is the fraction of the 2^(n+1)
+Some quantities come from the rule alone. `langton_lambda` is the fraction of the 2^(n+1)
 (own state, count) configurations, weighted by the C(n, k) neighbourhoods having count k, that
-map to a live cell. `mean_field` lists the stable fixed points of the mean-field density map
-`rho -> (1-rho) P[Bin(n,rho) in B] + rho P[Bin(n,rho) in S]`, which knows only the degree; its
-disagreement with `rho_final` measures how much the spatial arrangement matters for that rule
-(rules that freeze are invisible to it, since it assumes the grid is reshuffled every step).
+map to a live cell. The mean-field density map
+`f(rho) = (1-rho) P[Bin(n,rho) in B] + rho P[Bin(n,rho) in S]` knows only the degree, so its
+disagreement with `rho_final` measures how much the spatial arrangement matters for that rule.
+Compare a run with `mean_field_attractor`, the attractor the map reaches from `--density`
+(`mean_field_period` values, sorted; empty with period null when the orbit does not close
+within 64 steps), not with the stable fixed points `mean_field` lists: a rule can have several,
+and the soup's starting density picks one. B6/S56 has stable points 0 and 1 and the map sends 0.5
+to 0, and a rule with B0 and without S6 has no stable fixed point at all while its map strobes
+between 0 and 1 as its soup does. Fixed points at 0 and 1 are exact (0 when 0 is not in B, 1
+when n is in S), and an orbit creeping onto a neutral one (|f'| = 1, such as 1 for B2/S23456) is
+reported as converging there. `mean_field_lyapunov` is the orbit's Lyapunov exponent: positive
+for a chaotic map.
 
 `--rules` takes `all`, `dual`, `random:N` or a list of B/S strings. Several `--grid` sizes in
 one run give the period spectrum as a function of torus size.
@@ -106,14 +114,41 @@ object found, and how many components were not objects, by reason.
 | `unsettled`  | no repeat within `--max-period` generations               |
 | `too_large`  | grew to span half its torus (self-interaction across the seam); a larger `--margin` gives more room |
 
-An object's `key` is its identity: the cells of its smallest phase relative to one of them, the
-smallest such list over every choice of anchor, so two objects have the same key exactly when
-one is a translate of the other, whatever torus or soup they came from. Rotations and
-reflections are not identified (a glider heading each way is its own entry): the lattices have
-different point groups, and relating objects under them is analysis, not census. `population`
-and `max_population` are the smallest and largest phase. The summary lists the ten most common
-objects over every record in the file for that rule and torus size; `objects.catalogue` lists
-them all.
+An object's `key` names it up to translation: the cells of its fewest-cell phase relative to one
+of them, the smallest such list over every choice of anchor (ties between phases go to the
+smaller list), so two objects have the same key exactly when one is a translate of the other,
+whatever torus or soup they came from. `population` and `max_population` are the smallest and
+largest phase.
+
+`canonical_key` also forgets orientation. Outer-totalistic rules commute with every symmetry of
+the lattice, so a rotated or reflected object is the same object: the square lattice has 8
+point symmetries, the hexagon and triangle lattices 12 (`core.translations.point_group`).
+Translation keys alone count one object several times and can even split it unevenly: the
+hexagonal domino that alternates with a two-cell bridge under B2 is filed under the domino's
+key in one orientation and under the bridge's in the other two, because the bridge's list sorts
+first there. The canonical key is the smallest key over every fewest-cell phase and every
+point-group image, so it names the object once.
+
+`rule_min`, `rule_max` and `rule_count` give the object's rule range. Along its cycle every
+cell, live or dead, makes some (state, neighbour count) to next-state transition; the rules
+making exactly those transitions are exactly the rules running the same cycle, and they form a
+subcube of the rule space, from `rule_min` (the counts the cycle needs) to `rule_max` (every
+count it does not forbid), holding `rule_count` rules. Life's glider runs in the 256 rules from
+B3/S23 to B3678/S0235678; the hexagonal domino-bridge oscillator in the 512 from B2/S to
+B23456/S23456.
+
+The summary lists the ten most common objects up to symmetry over every record in the file for
+that rule and torus size, with both distinct counts. `objects.catalogue(records)` lists every
+object up to translation and `objects.catalogue(records, up_to_symmetry=True)` up to symmetry;
+an entry is one pattern with one behaviour (a domino is a still life under some rules and
+oscillates under others), with `count` sightings under `rules` distinct rules. Records written
+before canonical keys were recorded are re-identified once per rule and key to recover theirs:
+
+```python
+from latticelife.experiments.harness import read_jsonl
+from latticelife.experiments.objects import catalogue
+merged = catalogue(read_jsonl("out/soups-hexagon-sparse-settled.jsonl"), up_to_symmetry=True)
+```
 
 Two objects closer than `--radius` are harvested as one component and identified together, as a
 compound with the least common multiple of their periods; an object with internal gaps wider

@@ -665,13 +665,17 @@ def run_soup(args: argparse.Namespace) -> int:
         margin=args.margin,
     )
     status = _run_experiment("soup", records, len(seeds), summary)
-    listed = objects.catalogue(
+    this_run = [
         r
         for r in read_jsonl(out)
         if r.get("rule") == summary["rule"] and r.get("grid") == args.grid
-    )
-    summary["distinct_objects"] = len(listed)
-    summary["objects"] = listed[:10]
+    ]
+    # Objects up to translation, and up to rotation and reflection too: a rotated object is the
+    # same object (docs/experiments.md), so the list shows the merged catalogue.
+    summary["distinct_objects"] = len(objects.catalogue(this_run))
+    merged = objects.catalogue(this_run, up_to_symmetry=True)
+    summary["distinct_objects_up_to_symmetry"] = len(merged)
+    summary["objects"] = merged[:10]
     print(json.dumps(summary))
     return status
 

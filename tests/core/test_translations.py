@@ -239,3 +239,106 @@ def test_wrap_is_required():
     TorusTranslations("hexagon", width, height)
     with pytest.raises(ValueError):
         TorusTranslations("hexagon", 5, 4)  # odd width cannot wrap
+
+
+# --- point groups -------------------------------------------------------------------------------
+
+from latticelife.core.translations import (  # noqa: E402
+    canonical_key,
+    plane_key,
+    point_group,
+    symmetric_images,
+    transform_key,
+)
+
+ORDERS = {"square": 8, "hexagon": 12, "triangle": 12}
+
+
+def _plane_neighbours(adjacency, width, height, cell):
+    """The neighbours of plane cell `cell`, read off a torus adjacency, as nearby plane cells."""
+    r, c = cell
+    out = set()
+    for j in adjacency[(r % height) * width + (c % width)]:
+        nr, nc = divmod(int(j), width)
+        dr = (nr - r % height + height // 2) % height - height // 2
+        dc = (nc - c % width + width // 2) % width - width // 2
+        out.add((r + dr, c + dc))
+    return out
+
+
+@pytest.mark.parametrize(("shape", "mode"), SHAPES)
+def test_point_group_elements_map_neighbours_to_neighbours(shape, mode):
+    """Every element is an automorphism of the infinite lattice, checked on cells round the
+    origin against the adjacency `core.geometries` builds."""
+    group = point_group(shape)
+    assert len(group) == ORDERS[shape]
+    assert group[0]((3, -5)) == (3, -5)  # the identity comes first
+    size = 40
+    adjacency = build_adjacency(shape, size, size, True, mode)
+    for g in group:
+        for r in range(-5, 6):
+            for c in range(-5, 6):
+                image_neighbours = _plane_neighbours(adjacency, size, size, g((r, c)))
+                mapped = {g(p) for p in _plane_neighbours(adjacency, size, size, (r, c))}
+                assert mapped == image_neighbours, (shape, mode, (r, c))
+
+
+@pytest.mark.parametrize(("shape", "mode"), SHAPES)
+def test_point_group_elements_are_distinct(shape, mode):
+    asymmetric = ((0, 0), (0, 1), (1, 1), (3, 0), (2, 4))  # no symmetry on any lattice
+    if shape == "triangle":
+        asymmetric = ((0, 0), (0, 1), (1, 1), (3, 1), (2, 4))
+    assert len(symmetric_images(plane_key(asymmetric, shape, mode), shape, mode)) == ORDERS[shape]
+
+
+@pytest.mark.parametrize(("shape", "mode"), SHAPES)
+@given(seed=st.integers(min_value=0, max_value=10_000))
+@settings(max_examples=15, deadline=None)
+def test_rotating_then_stepping_equals_stepping_then_rotating(shape, mode, seed):
+    """The property canonical keys rely on: outer-totalistic rules commute with the point
+    group. A random pattern near the middle of a big torus, a random rule, a few steps."""
+    from latticelife.core.geometries import max_degree
+
+    rng = np.random.default_rng(seed)
+    n = max_degree(shape, mode)
+    rule = Rule.random(n, 0.4, 0.4, rng)
+    rule = Rule(birth=rule.birth - {0}, survive=rule.survive)  # keep the background empty
+    size, steps = 48, 3
+    pattern = {(int(r), int(c)) for r, c in rng.integers(-3, 4, size=(10, 2))}
+    g = point_group(shape)[int(rng.integers(1, len(point_group(shape))))]
+
+    def run(cells):
+        grid = LatticeGrid([Lifeform(1, rule)], shape, size, size, True, mode)
+        for r, c in cells:
+            grid.occupancy[(r % size) * size + (c % size)] = 1
+        for _ in range(steps):
+            grid.step(rng)
+        live = set()
+        for index in np.flatnonzero(grid.occupancy):
+            rr, cc = divmod(int(index), size)
+            live.add((rr if rr < size // 2 else rr - size, cc if cc < size // 2 else cc - size))
+        return live
+
+    assert {g(p) for p in run(pattern)} == run({g(p) for p in pattern})
+
+
+def test_plane_key_matches_pattern_key_on_a_torus():
+    torus = TorusTranslations("hexagon", 20, 16)
+    cells = [(3, 4), (3, 5), (4, 4), (6, 7)]
+    assert plane_key(cells, "hexagon") == torus.pattern_key([r * 20 + c for r, c in cells])
+    assert plane_key([], "square") == ()
+
+
+def test_canonical_keys_merge_orientations_and_nothing_else():
+    domino = ((-1, 0), (0, 0))
+    diagonal = ((-1, -1), (0, 0))
+    bridge = ((-2, -1), (0, 0))
+    straight = ((0, 0), (1, 0), (2, 0))
+    assert len(symmetric_images(domino, "hexagon")) == 3
+    assert canonical_key(domino, "hexagon") == canonical_key(diagonal, "hexagon")
+    assert canonical_key(domino, "hexagon") != canonical_key(bridge, "hexagon")
+    assert canonical_key(straight, "square") == canonical_key(((0, 0), (0, 1), (0, 2)), "square")
+    for g in point_group("triangle"):
+        assert canonical_key(transform_key(bridge, g, "triangle"), "triangle") == canonical_key(
+            bridge, "triangle"
+        )

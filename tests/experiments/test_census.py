@@ -187,3 +187,47 @@ def test_rule_strings_round_trip_through_records_on_twelve_neighbour_triangles(c
     assert Rule.from_bs_string(record.rule) == rule
     assert Rule.from_bs_string(record.dual) == rule.complement(12)
     assert np.isfinite(record.langton_lambda)
+
+
+# --- mean-field attractor -----------------------------------------------------------------------
+
+from latticelife.experiments.census import mean_field_orbit  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("rule", "n", "period", "values"),
+    [
+        # Stable points 0 and 1, but 0.5 lies in 0's basin: the map predicts extinction.
+        ("B6/S56", 6, 1, [0.0]),
+        # B0 without S6: no stable fixed point, a superstable strobe between empty and full.
+        ("B0/S", 6, 2, [0.0, 1.0]),
+        # 1 is a neutral fixed point (|f'(1)| = 1) that the orbit creeps onto from below.
+        ("B345/S123456", 6, 1, [1.0]),
+        ("B2/S23456", 6, 1, [1.0]),
+    ],
+)
+def test_mean_field_orbit_reports_the_attractor_reached_from_the_soup(rule, n, period, values):
+    orbit = mean_field_orbit(Rule.from_bs_string(rule), n, 0.5)
+    assert (orbit["period"], orbit["values"]) == (period, values)
+
+
+def test_mean_field_orbit_of_life_and_its_lyapunov_exponent():
+    orbit = mean_field_orbit(LIFE, 8, 0.5)
+    assert orbit["period"] == 1 and 0.36 < orbit["values"][0] < 0.38
+    assert orbit["lyapunov"] < 0  # a stable fixed point attracts
+    assert mean_field_orbit(Rule(set(), set(range(9))), 8, 0.3)["values"] == [0.3]  # identity
+
+
+def test_fixed_points_at_0_and_1_are_exact_even_as_multiple_roots():
+    """B4/S3456 has a triple root at 1; root finding used to split it into 0.999993."""
+    fixed, stable = mean_field_fixed_points(Rule({4}, {3, 4, 5, 6}), 6)
+    assert fixed[0] == 0.0 and fixed[-1] == 1.0
+    assert all(p == 1.0 or p < 0.99 for p in fixed)
+    assert stable == [0.0]  # 1 is neutral, not stable
+
+
+def test_census_records_carry_the_mean_field_attractor(config):
+    record = classify_rule(CensusTask(config, "B6/S56", "hexagon", 8, 10, 1, 0.5, 5))
+    assert (record.mean_field_attractor, record.mean_field_period) == ([0.0], 1)
+    assert record.mean_field == [0.0, 1.0]
+    assert isinstance(record.mean_field_lyapunov, float)

@@ -24,15 +24,29 @@ provided the pattern spans less than half the torus each way; `place` puts such 
 any torus. Both keep the lattice's constraints: a hexagon pattern is only ever moved by whole
 pairs of columns' worth of parity, i.e. its anchor stays on an even column, and a triangle
 pattern's anchor keeps its orientation, so a key names one geometric shape.
+
+Point groups. Outer-totalistic rules only count neighbours, so they commute with every symmetry
+of the lattice, not just its translations: a rotated or reflected object is the same object. A
+key's cells are plane coordinates (offset coordinates relative to an origin cell of the even
+class), so the point group acts on keys directly (`point_group`, `transform_key`), and
+`canonical_key` names a pattern up to translation, rotation and reflection: the smallest key
+among its images. The square (Moore) lattice has the 8 symmetries of the square; the hexagon
+lattice the 12 of the regular hexagon, done exactly in cube coordinates; the triangle lattice the
+12 of the triangular tiling, done on cell centroids rotated about a tiling vertex (a rotation by 60
+degrees turns up triangles into down ones, which `pattern_key` keeps apart by the anchor's
+orientation). The test suite checks that each element maps neighbours to neighbours and commutes
+with `LatticeGrid.step` for random rules.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import math
+from collections.abc import Callable, Iterable
+from functools import cache
 
 import numpy as np
 
-from latticelife.core.geometries import validate_dimensions
+from latticelife.core.geometries import min_wrap_size, validate_dimensions
 
 Vector = tuple[int, int]
 PatternKey = tuple[tuple[int, int], ...]
@@ -213,3 +227,166 @@ def key_extent(key: PatternKey) -> tuple[int, int, int, int]:
     rows = [r for r, _ in key]
     cols = [c for _, c in key]
     return min(rows), min(cols), max(rows), max(cols)
+
+
+# --- point groups -------------------------------------------------------------------------------
+
+Cell = tuple[int, int]
+CellMap = Callable[[Cell], Cell]
+
+
+def _square_group() -> list[CellMap]:
+    def rotate(cell: Cell) -> Cell:
+        r, c = cell
+        return c, -r
+
+    def reflect(cell: Cell) -> Cell:
+        r, c = cell
+        return r, -c
+
+    return _closure(rotate, reflect, 8)
+
+
+def _hex_to_cube(cell: Cell) -> tuple[int, int, int]:
+    r, c = cell
+    x = c
+    z = r - (c - (c & 1)) // 2
+    return x, -x - z, z
+
+
+def _cube_to_hex(x: int, y: int, z: int) -> Cell:
+    assert x + y + z == 0
+    return z + (x - (x & 1)) // 2, x
+
+
+def _hexagon_group() -> list[CellMap]:
+    def rotate(cell: Cell) -> Cell:  # 60 degrees about the centre of cell (0, 0)
+        x, y, z = _hex_to_cube(cell)
+        return _cube_to_hex(-z, -x, -y)
+
+    def reflect(cell: Cell) -> Cell:
+        x, y, z = _hex_to_cube(cell)
+        return _cube_to_hex(x, z, y)
+
+    return _closure(rotate, reflect, 12)
+
+
+_SQRT3 = math.sqrt(3.0)
+
+
+def _triangle_centroid(cell: Cell) -> tuple[float, float]:
+    """Centroid of the triangle at (row, column) in the geometry `core.geometries` builds the
+    adjacency from (side 2): up triangles on even row + column, apex up."""
+    r, c = cell
+    up = (r + c) % 2 == 0
+    return float(c), r * _SQRT3 + (_SQRT3 / 6 if up else -_SQRT3 / 6)
+
+
+def _triangle_cell(x: float, y: float) -> Cell:
+    c = round(x)
+    if abs(x - c) > 1e-6:
+        raise ValueError(f"({x}, {y}) is not a triangle centroid")
+    for offset, up in ((_SQRT3 / 6, True), (-_SQRT3 / 6, False)):
+        r_float = (y - offset) / _SQRT3
+        r = round(r_float)
+        if abs(r_float - r) < 1e-6 and ((r + c) % 2 == 0) == up:
+            return r, c
+    raise ValueError(f"({x}, {y}) is not a triangle centroid")
+
+
+def _triangle_group() -> list[CellMap]:
+    # Rotation by 60 degrees about the apex of the up triangle (0, 0), a vertex of the tiling.
+    vx, vy = 0.0, -_SQRT3 / 2
+    cos60, sin60 = 0.5, _SQRT3 / 2
+
+    def rotate(cell: Cell) -> Cell:
+        x, y = _triangle_centroid(cell)
+        dx, dy = x - vx, y - vy
+        return _triangle_cell(vx + cos60 * dx - sin60 * dy, vy + sin60 * dx + cos60 * dy)
+
+    def reflect(cell: Cell) -> Cell:  # the vertical line through that vertex
+        r, c = cell
+        return r, -c
+
+    return _closure(rotate, reflect, 12)
+
+
+def _closure(rotate: CellMap, reflect: CellMap, order: int) -> list[CellMap]:
+    """The `order` maps rotate^k and rotate^k after reflect."""
+    turns = order // 2
+
+    def element(k: int, mirrored: bool) -> CellMap:
+        def apply(cell: Cell) -> Cell:
+            if mirrored:
+                cell = reflect(cell)
+            for _ in range(k):
+                cell = rotate(cell)
+            return cell
+
+        return apply
+
+    return [element(k, mirrored) for mirrored in (False, True) for k in range(turns)]
+
+
+@cache
+def point_group(shape: str) -> tuple[CellMap, ...]:
+    """Every symmetry of `shape`'s lattice fixing a point, as maps on plane cell coordinates
+    (offset row and column; a key's cells are such coordinates). The identity comes first."""
+    shape = shape.lower()
+    if shape == "square":
+        return tuple(_square_group())
+    if shape == "hexagon":
+        return tuple(_hexagon_group())
+    if shape == "triangle":
+        return tuple(_triangle_group())
+    raise ValueError(f"Unsupported grid shape: {shape}")
+
+
+def plane_key(cells: Iterable[Cell], shape: str, triangle_mode: str = "edge+vertex") -> PatternKey:
+    """`pattern_key` of a pattern given by plane cell coordinates (any integers), read on a torus
+    large enough that the answer cannot depend on it."""
+    cells = list(cells)
+    if not cells:
+        return ()
+    rows = [r for r, _ in cells]
+    cols = [c for _, c in cells]
+    # Shift into the positive quadrant by a translation the lattice allows (an even number of
+    # columns keeps hexagon column parity; an even row + column shift keeps triangle orientation).
+    shift_r, shift_c = -min(rows), -min(cols)
+    if shape == "hexagon" and shift_c % 2:
+        shift_c += 1
+    if shape == "triangle" and (shift_r + shift_c) % 2:
+        shift_c += 1
+    span_r = max(rows) - min(rows) + 2
+    span_c = max(cols) - min(cols) + 2
+    min_width, min_height = min_wrap_size(shape, triangle_mode)
+    height = max(2 * span_r + 2, min_height)
+    width = max(2 * span_c + 2, min_width)
+    height += height % 2
+    width += width % 2
+    torus = TorusTranslations(shape, width, height, triangle_mode)
+    indices = [(r + shift_r) * width + (c + shift_c) for r, c in cells]
+    key = torus.pattern_key(indices)
+    assert key is not None  # the torus is more than twice the pattern's extent
+    return key
+
+
+def transform_key(
+    key: PatternKey, element: CellMap, shape: str, triangle_mode: str = "edge+vertex"
+) -> PatternKey:
+    """The key of `key`'s pattern moved by one point-group element."""
+    return plane_key((element(cell) for cell in key), shape, triangle_mode)
+
+
+def symmetric_images(
+    key: PatternKey, shape: str, triangle_mode: str = "edge+vertex"
+) -> set[PatternKey]:
+    """The distinct keys of `key`'s pattern under the lattice's point group: how many there are
+    is the pattern's number of orientations (the group order over its stabiliser's)."""
+    return {transform_key(key, g, shape, triangle_mode) for g in point_group(shape)}
+
+
+def canonical_key(key: PatternKey, shape: str, triangle_mode: str = "edge+vertex") -> PatternKey:
+    """The identity of `key`'s pattern up to translation, rotation and reflection: the smallest
+    of its images' keys."""
+    return min(symmetric_images(key, shape, triangle_mode))

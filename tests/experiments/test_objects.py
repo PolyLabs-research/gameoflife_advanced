@@ -227,9 +227,10 @@ def test_soup_objects_and_run_soups_record_and_resume(tmp_path):
 
     listed = catalogue(read_jsonl(out))
     assert all(
-        set(entry) == {"key", "kind", "period", "displacement", "population", "count"}
+        set(entry) == {"key", "kind", "period", "displacement", "population", "count", "rules"}
         for entry in listed
     )
+    assert len(catalogue(read_jsonl(out), up_to_symmetry=True)) <= len(listed)
     assert listed == sorted(listed, key=lambda e: -e["count"])
 
 
@@ -242,3 +243,92 @@ def test_run_soups_matches_in_parallel(tmp_path):
         for r in run_soups(*args, tmp_path / "p.jsonl", workers=2, max_period=30)
     }
     assert serial == [parallel[seed] for seed in (1, 2, 3)]
+
+
+# --- canonical keys and rule ranges -------------------------------------------------------------
+
+
+def _bits(rule_text):
+    rule = Rule.from_bs_string(rule_text)
+    return rule.birth, rule.survive
+
+
+def test_the_hexagon_domino_bridge_oscillator_is_one_object_in_every_orientation():
+    """The orientation artifact of translation-only keys: in two orientations the cycle is filed
+    under the domino, in the other under the bridge, but it is one object. Its rule range is the
+    hand-derived condition: born on 2, dies on 0 and 1, never born on 0 or 1."""
+    b2 = Rule(birth={2}, survive=set())
+    keys = [((-1, 0), (0, 0)), ((-1, -1), (0, 0)), ((-1, 1), (0, 0)), ((0, -2), (0, 0))]
+    found = [identify(key, b2, "hexagon") for key in keys]
+    assert {(f.kind, f.period) for f in found} == {("oscillator", 2)}
+    assert len({f.key for f in found}) == 3  # three orientations, filed under two key types
+    assert len({f.canonical_key for f in found}) == 1
+    assert (found[0].rule_min, found[0].rule_max, found[0].rule_count) == (
+        "B2/S",
+        "B23456/S23456",
+        2**9,
+    )
+
+
+def test_rule_range_is_exactly_the_rules_that_run_the_same_cycle():
+    """Every rule inside the range runs the same object; every rule just outside it does not."""
+    glider = identify(_key(GLIDER), LIFE, "square")
+    assert (glider.rule_min, glider.rule_max, glider.rule_count) == (
+        "B3/S23",
+        "B3678/S0235678",
+        256,
+    )
+    low_b, low_s = _bits(glider.rule_min)
+    high_b, high_s = _bits(glider.rule_max)
+    rng = np.random.default_rng(0)
+    for _ in range(12):
+        birth = low_b | {k for k in high_b - low_b if rng.random() < 0.5}
+        survive = low_s | {k for k in high_s - low_s if rng.random() < 0.5}
+        inside = identify(_key(GLIDER), Rule(birth, survive), "square")
+        assert (inside.kind, inside.period, inside.displacement) == ("spaceship", 4, (1, 1))
+    for flipped in [Rule({3, 4}, {2, 3}), Rule({3}, {2, 3, 4}), Rule({3}, {3})]:
+        outside = identify(_key(GLIDER), flipped, "square")
+        assert isinstance(outside, str) or (outside.kind, outside.period) != ("spaceship", 4)
+
+
+def test_canonical_key_is_the_same_for_every_phase_and_orientation_of_an_oscillator():
+    blinker_a = identify(_key([(0, 0), (0, 1), (0, 2)]), LIFE, "square")
+    blinker_b = identify(_key([(0, 0), (1, 0), (2, 0)]), LIFE, "square")
+    assert blinker_a.canonical_key == blinker_b.canonical_key
+    glider_turned = identify(_key([(0, 1), (1, 0), (2, 0), (2, 1), (2, 2)]), LIFE, "square")
+    assert glider_turned.kind == "spaceship"
+    assert glider_turned.canonical_key == identify(_key(GLIDER), LIFE, "square").canonical_key
+
+
+def test_catalogue_up_to_symmetry_merges_orientations_including_old_records():
+    """Records written before canonical keys existed are re-identified to merge them."""
+    b2 = Rule(birth={2}, survive=set())
+    objects = [
+        identify(key, b2, "hexagon").to_json()
+        for key in [((-1, 0), (0, 0)), ((-1, -1), (0, 0)), ((-1, 1), (0, 0))]
+    ]
+    old = [{k: v for k, v in o.items() if k not in ("canonical_key",)} for o in objects]
+    for records in (
+        [{"rule": "B2/S", "shape": "hexagon", "objects": objects}],
+        [{"rule": "B2/S", "shape": "hexagon", "triangle_mode": None, "objects": old}],
+    ):
+        by_key = catalogue(records)
+        merged = catalogue(records, up_to_symmetry=True)
+        assert len(by_key) == 3  # one domino key and two bridge keys
+        assert [(e["kind"], e["period"], e["count"], e["rules"]) for e in merged] == [
+            ("oscillator", 2, 3, 1)
+        ]
+
+
+def test_catalogue_keeps_one_pattern_apart_when_it_behaves_differently_under_two_rules():
+    domino = ((-1, 0), (0, 0))
+    still = identify(domino, Rule(set(), {1}), "hexagon").to_json()
+    blinks = identify(domino, Rule({2}, set()), "hexagon").to_json()
+    records = [
+        {"rule": "B/S1", "shape": "hexagon", "objects": [still]},
+        {"rule": "B2/S", "shape": "hexagon", "objects": [blinks]},
+    ]
+    assert sorted((e["kind"], e["rules"]) for e in catalogue(records)) == [
+        ("oscillator", 1),
+        ("still", 1),
+    ]

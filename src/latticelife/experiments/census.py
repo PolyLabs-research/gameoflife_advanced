@@ -13,14 +13,19 @@ finite system, not a guess from the density trace:
   generation the cycle began (`transient`);
 - `unsettled`: no state repeated within `steps` — chaotic, or a transient longer than the run.
 
-Beside the measured behaviour each record carries two things computable from the rule alone,
-for the analysis to set against it: Langton's lambda (the fraction of the 2^(n+1) neighbourhood
-configurations, weighted by multiplicity, that map to a live cell) and the stable fixed points
-of the mean-field map rho -> (1-rho) P[Bin(n, rho) in B] + rho P[Bin(n, rho) in S], which knows
-only the degree and so measures, by its disagreement with the run, how much the spatial
-arrangement of cells matters for that rule. The complement rule (`Rule.complement`) is recorded
-as `dual`: it behaves as this rule does on the complemented grid, so a census of one rule per dual
-pair (`enumerate_rules(up_to_duality=True)`) covers the whole space.
+Beside the measured behaviour each record carries things computable from the rule alone, for
+the analysis to set against it: Langton's lambda (the fraction of the 2^(n+1) neighbourhood
+configurations, weighted by multiplicity, that map to a live cell), the stable fixed points of the
+mean-field map rho -> (1-rho) P[Bin(n, rho) in B] + rho P[Bin(n, rho) in S] (`mean_field`), and
+the attractor that map actually reaches from the soup's initial density (`mean_field_attractor`,
+`mean_field_period`, `mean_field_lyapunov`: `mean_field_orbit`). The attractor is the prediction
+to compare a run with. A rule's largest stable fixed point is not: B6/S56 has stable points 0 and
+1 but its map sends 0.5 to 0, and every rule with B0 and no S6 has no stable fixed point at all
+while its map strobes between 0 and 1 as the soup does. Mean field knows only the degree, so its
+disagreement with the run measures how much the spatial arrangement of cells matters for that
+rule. The complement rule (`Rule.complement`) is recorded as `dual`: it behaves as this rule does
+on the complemented grid, so a census of one rule per dual pair
+(`enumerate_rules(up_to_duality=True)`) covers the whole space.
 """
 
 from __future__ import annotations
@@ -111,19 +116,38 @@ def mean_field_map(rule: Rule, n: int) -> Polynomial:
 def mean_field_fixed_points(rule: Rule, n: int) -> tuple[list[float], list[float]]:
     """(all fixed points, the stable ones) of `mean_field_map` in [0, 1], rounded to 6 places.
     Stable means |f'(rho*)| < 1. The identity rule (nothing is born, everything survives) fixes
-    every density; it gets ([], [])."""
+    every density; it gets ([], []).
+
+    0 and 1 are fixed points exactly when 0 is not in B and n is in S, often as multiple roots
+    of f(rho) - rho (B4/S3456 has a triple root at 1), which numerical root finding splits into
+    spurious points such as 0.999993. The polynomial's coefficients are integers, so those roots
+    are divided out exactly first and only the interior roots are found numerically."""
     f = mean_field_map(rule, n)
     g = f - Polynomial([0.0, 1.0])
-    coefficients = g.trim(1e-12).coef
-    if coefficients.size <= 1 and abs(coefficients).max(initial=0.0) < 1e-12:
+    coefficients = [round(c) for c in g.coef]  # integers: exact in floating point too
+    while coefficients and coefficients[-1] == 0:
+        coefficients.pop()
+    if not coefficients:
         return [], []
     fixed: list[float] = []
-    for root in g.roots():
+    while len(coefficients) > 1 and coefficients[0] == 0:  # a root at 0
+        coefficients = coefficients[1:]
+        if 0.0 not in fixed:
+            fixed.append(0.0)
+    while len(coefficients) > 1 and sum(coefficients) == 0:  # a root at 1: divide by (x - 1)
+        quotient = [0] * (len(coefficients) - 1)
+        carry = 0
+        for i in range(len(coefficients) - 1, 0, -1):
+            carry += coefficients[i]
+            quotient[i - 1] = carry
+        coefficients = quotient
+        if 1.0 not in fixed:
+            fixed.append(1.0)
+    for root in Polynomial(coefficients).roots() if len(coefficients) > 1 else []:
         if abs(root.imag) > 1e-7:
             continue
         value = float(root.real)
-        if -1e-9 <= value <= 1 + 1e-9:
-            value = min(max(value, 0.0), 1.0)
+        if 1e-9 < value < 1 - 1e-9:
             rounded = round(value, 6)
             if rounded not in fixed:
                 fixed.append(rounded)
@@ -131,6 +155,74 @@ def mean_field_fixed_points(rule: Rule, n: int) -> tuple[list[float], list[float
     slope = f.deriv()
     stable = [point for point in fixed if abs(float(slope(point))) < 1 - 1e-9]
     return fixed, stable
+
+
+def mean_field_orbit(
+    rule: Rule, n: int, rho0: float = 0.5, transient: int = 4000, max_period: int = 64
+) -> dict:
+    """Where the mean-field map goes from `rho0`: after `transient` iterations, the attractor's
+    `period` and its `values` (sorted, 6 decimals), or period None and no values when the orbit
+    has not closed within `max_period` steps (chaotic, or quasi-periodic), plus the orbit's
+    Lyapunov exponent over the next 1,000 iterations (`lyapunov`; positive for chaos, very
+    negative for a superstable cycle). An orbit still creeping monotonically onto a neutral fixed
+    point (|f'| = 1, as at 0 or 1 for rules such as B2/S23456, where the distance to 1 shrinks
+    like t^(-1/4)) is reported as that fixed point: f(x) - x keeps its sign up to the next fixed
+    point and f increases on the way, so the orbit converges to it."""
+    f = mean_field_map(rule, n)
+    coefficients = [float(c) for c in f.coef][::-1]
+    slope = [float(c) for c in f.deriv().coef][::-1]
+
+    def horner(coefs: list[float], x: float) -> float:
+        value = 0.0
+        for c in coefs:
+            value = value * x + c
+        return value
+
+    def step(x: float) -> float:
+        return min(1.0, max(0.0, horner(coefficients, x)))
+
+    x = float(rho0)
+    for _ in range(transient):
+        x = step(x)
+    orbit = [x]
+    period = None
+    y = x
+    for p in range(1, max_period + 1):
+        y = step(y)
+        if abs(y - x) < 1e-9:
+            period = p
+            break
+        orbit.append(y)
+    lyapunov = 0.0
+    z = x
+    for _ in range(1000):
+        lyapunov += math.log(max(abs(horner(slope, z)), 1e-12))
+        z = step(z)
+    lyapunov /= 1000
+    if period is None:
+        target = _creeping_onto(x, step, horner, slope, rule, n)
+        if target is not None:
+            return {"period": 1, "values": [target], "lyapunov": round(lyapunov, 4)}
+        return {"period": None, "values": [], "lyapunov": round(lyapunov, 4)}
+    values = sorted({round(v, 6) for v in orbit[:period]})
+    return {"period": period, "values": values, "lyapunov": round(lyapunov, 4)}
+
+
+def _creeping_onto(x, step, horner, slope, rule: Rule, n: int) -> float | None:
+    """The fixed point an orbit at `x` converges onto monotonically, or None: the next fixed
+    point in the direction f(x) - x points, if the map increases all the way there (sampled)."""
+    drift = step(x) - x
+    if drift == 0.0 or abs(drift) > 1e-4:
+        return None
+    fixed, _ = mean_field_fixed_points(rule, n)
+    ahead = [p for p in fixed if (p - x) * drift > 0]
+    if not ahead:
+        return None
+    target = min(ahead, key=lambda p: abs(p - x))
+    samples = [x + (target - x) * i / 64 for i in range(65)]
+    if all(horner(slope, y) > 0 for y in samples):
+        return target
+    return None
 
 
 @dataclass(frozen=True)
@@ -155,6 +247,9 @@ class RuleRecord:
     max_cluster_size: int
     langton_lambda: float
     mean_field: list[float]  # stable fixed points of the mean-field map
+    mean_field_attractor: list[float]  # where the map goes from `density` (see mean_field_orbit)
+    mean_field_period: int | None
+    mean_field_lyapunov: float
     dual: str
 
     def to_json(self) -> dict:
@@ -230,6 +325,7 @@ def classify_rule(task: CensusTask) -> RuleRecord:
     )
     measured = classify_session(session, task.steps, task.tail)
     _, stable = mean_field_fixed_points(rule, n)
+    orbit = mean_field_orbit(rule, n, task.density)
     return RuleRecord(
         rule=rule.to_bs_string(n),
         shape=task.shape,
@@ -240,6 +336,9 @@ def classify_rule(task: CensusTask) -> RuleRecord:
         density=task.density,
         langton_lambda=langton_lambda(rule, n),
         mean_field=stable,
+        mean_field_attractor=orbit["values"],
+        mean_field_period=orbit["period"],
+        mean_field_lyapunov=orbit["lyapunov"],
         dual=rule.complement(n).to_bs_string(n),
         **measured,
     )
@@ -321,6 +420,7 @@ __all__ = [
     "langton_lambda",
     "mean_field_fixed_points",
     "mean_field_map",
+    "mean_field_orbit",
     "rule_from_masks",
     "rule_masks",
     "rule_space_size",
