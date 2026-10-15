@@ -74,8 +74,9 @@ Compare a run with `mean_field_attractor`, the attractor the map reaches from `-
 (`mean_field_period` values, sorted; empty with period null when no cycle of period up to 64
 attracts the orbit), not with the stable fixed points `mean_field` lists: a rule can have
 several, and the soup's starting density picks one. B6/S56 has stable points 0 and 1 and the map
-sends 0.5 to 0, and a rule with B0 and without S6 has no stable fixed point at all while its map
-strobes between 0 and 1. Two exact facts help reading these fields. f(1/2) is Langton's lambda,
+sends 0.5 to 0, and B0/S has no stable fixed point at all while its map strobes between 0 and 1
+(most rules with B0 and without S6 do have a stable fixed point or another cycle, though: B0/S13
+settles at 0.253). Two exact facts help reading these fields. f(1/2) is Langton's lambda,
 so from density 1/2 the map's first step lands on lambda, and a rule with lambda = 1/2 sits on
 1/2 for ever, stable or not. And the dual's map is x -> 1 - f(1 - x).
 
@@ -128,8 +129,8 @@ object found, and how many components were not objects, by reason.
 | `oscillator` | period above 1, no displacement                           |
 | `spaceship`  | returns displaced: speed is `displacement` per `period`   |
 | `died`       | nothing left                                              |
-| `unsettled`  | no repeat within `--max-period` generations               |
-| `too_large`  | grew to span half its torus (self-interaction across the seam), less one row on hexagons; a larger `--margin` gives more room. On hexagons the torus is sized from the pattern's hexagonal hull, which a rule without 0, 1 or 2 in B never grows beyond |
+| `unsettled`  | no repeat within `--max-period` generations (object periods run into the thousands: a 20-cell row under B3456/S234 settles into a period-953 oscillator) |
+| `too_large`  | grew to span half its torus from some cell (it would touch itself across the seam); a larger `--margin` gives more room. The torus is sized over every orientation of the pattern, and on hexagons from its hexagonal hull, which a rule without 0, 1 or 2 in B never grows beyond |
 
 An object's `key` names it up to translation: the cells of its fewest-cell phase relative to one
 of them, the smallest such list over every choice of anchor (ties between phases go to the

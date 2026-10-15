@@ -267,3 +267,25 @@ def test_a_soup_at_density_one_half_sits_on_its_map_even_when_unstable():
     assert (orbit["period"], orbit["values"]) == (1, [0.5])
     assert orbit["lyapunov"] > 0
     assert mean_field_orbit(Rule.from_bs_string("B3456/S256"), 6, 0.5)["lyapunov"] < 0
+
+
+@pytest.mark.parametrize(
+    ("rule", "n", "values"),
+    [
+        # Newton stalls 3e-3 short of a sixth-order root at 0: still exactly 0.
+        ("B/S01234", 6, [0.0]),
+        ("B2/S023456", 6, [1.0]),  # ... and its dual goes to exactly 0
+        ("B5/S012356", 6, [0.0]),
+        ("B/S01234567", 8, [0.0]),
+    ],
+)
+def test_mean_field_orbit_never_reports_a_stalled_point_as_a_fixed_point(rule, n, values):
+    orbit = mean_field_orbit(Rule.from_bs_string(rule), n, 0.5)
+    assert (orbit["period"], orbit["values"]) == (1, values)
+
+
+def test_mean_field_lyapunov_of_a_strongly_attracting_point_is_exact():
+    # f'(rho*) = 5.2433e-5 at the fixed point; evaluating at its 6-decimal rounding gave -9.9271.
+    assert mean_field_orbit(Rule.from_bs_string("B25/S06"), 6, 0.5)["lyapunov"] == pytest.approx(
+        -9.856, abs=1e-3
+    )

@@ -20,8 +20,8 @@ mean-field map rho -> (1-rho) P[Bin(n, rho) in B] + rho P[Bin(n, rho) in S] (`me
 the attractor that map actually reaches from the soup's initial density (`mean_field_attractor`,
 `mean_field_period`, `mean_field_lyapunov`: `mean_field_orbit`). The attractor is the prediction
 to compare a run with. A rule's largest stable fixed point is not: B6/S56 has stable points 0 and
-1 but its map sends 0.5 to 0, and every rule with B0 and no S6 has no stable fixed point at all
-while its map strobes between 0 and 1 as the soup does. Mean field knows only the degree, so its
+1 but its map sends 0.5 to 0, and B0/S has no stable fixed point at all while its map strobes
+between 0 and 1 as the soup does. Mean field knows only the degree, so its
 disagreement with the run measures how much the spatial arrangement of cells matters for that
 rule. The complement rule (`Rule.complement`) is recorded as `dual`: it behaves as this rule does
 on the complemented grid, so a census of one rule per dual pair
@@ -258,45 +258,70 @@ def mean_field_orbit(
 def _refine_cycle(x, period, step, slope, orbit, exact) -> tuple[list[float], float] | None:
     """The cycle of `period` near `x` that the orbit (`orbit`, starting at `x`) is reaching, as
     (its points from the one nearest `x`, its multiplier), at its minimal period; or None.
-    `exact` lists the map's exact fixed points: at a multiple root Newton converges only
-    linearly and its residual vanishes before the point is reached (|f(y) - y| < 1e-14 at
-    1 - y = 8e-4 for the fifth-order root of B2/S23456), so a fixed point or the 0-1 strobe it
-    stalls next to is snapped onto."""
-    y = x
-    for _ in range(400):  # Newton on f^p(y) - y; linear, not quadratic, at a multiple root
-        value, derivative = y, 1.0
-        for _ in range(period):
-            derivative *= _horner(slope, value)
-            value = step(value)
-        residual = value - y
-        if abs(residual) < 1e-14:
-            break
-        if abs(derivative - 1.0) < 1e-15:
-            break
-        y_next = min(1.0, max(0.0, y - residual / (derivative - 1.0)))
-        if y_next == y:
-            break
-        y = y_next
-    points = [y]
-    for _ in range(period - 1):
-        points.append(step(points[-1]))
+
+    Newton converges quadratically onto a simple root, and the point it returns is then exact
+    to rounding. At a multiple root (a neutral cycle, multiplier 1) it is only linear, and its
+    residual vanishes long before the point is reached: |f(y) - y| < 1e-14 at 3e-3 to 9e-3 from
+    the sixth-order root at 0 of B/S01234. So when the multiplier comes out within 1e-2 of 1,
+    the orbit is creeping, and it is snapped onto the exact fixed point it is creeping toward
+    (`exact`: the next one in the direction f(x) - x points), or onto the 0-1 strobe; a simple
+    root reached that way is then polished by Newton again, so the multiplier is exact too."""
+
+    def newton(y):
+        for _ in range(400):  # on f^p(y) - y
+            value, derivative = y, 1.0
+            for _ in range(period):
+                derivative *= _horner(slope, value)
+                value = step(value)
+            residual = value - y
+            if abs(residual) < 1e-14 or abs(derivative - 1.0) < 1e-15:
+                break
+            y_next = min(1.0, max(0.0, y - residual / (derivative - 1.0)))
+            if y_next == y:
+                break
+            y = y_next
+        return y
+
+    def cycle_from(y):
+        points = [y]
+        for _ in range(period - 1):
+            points.append(step(points[-1]))
+        return points
+
+    def multiplier_of(points):
+        product = 1.0
+        for point in points:
+            product *= _horner(slope, point)
+        return product
+
+    y = newton(x)
+    points = cycle_from(y)
     if abs(step(points[-1]) - y) > 1e-10:
         return None
     for divisor in range(1, period):
         if period % divisor == 0 and abs(points[divisor] - y) < 1e-10:
             points = points[:divisor]
             break
-    if len(points) == 1:
-        nearest = min(exact, key=lambda p: abs(p - points[0]), default=None)
-        if nearest is not None and abs(nearest - points[0]) < 1e-3:
-            points = [nearest]
-    elif len(points) == 2 and step(0.0) == 1.0 and step(1.0) == 0.0:
-        if min(abs(points[0]), abs(1 - points[0])) < 1e-3:
-            points = [float(round(points[0])), 1.0 - round(points[0])]
+    multiplier = multiplier_of(points)
+    if abs(multiplier - 1.0) < 1e-2:
+        drift = step(x) - x
+        if len(points) == 1 and exact:
+            if drift > 0:
+                ahead = [p for p in exact if p >= x]
+            elif drift < 0:
+                ahead = [p for p in exact if p <= x]
+            else:
+                ahead = []
+            target = min(ahead or exact, key=lambda p: abs(p - x))
+            if abs(_horner(slope, target) - 1.0) > 1e-6:
+                target = min(1.0, max(0.0, newton(target)))  # a simple root: polish it
+            points = [target]
+        elif len(points) == 2 and step(0.0) == 1.0 and step(1.0) == 0.0:
+            low, high = sorted(points)
+            if low < 0.5 < high:
+                points = [0.0, 1.0] if points[0] < 0.5 else [1.0, 0.0]
+        multiplier = multiplier_of(points)
     y = points[0]
-    multiplier = 1.0
-    for point in points:
-        multiplier *= _horner(slope, point)
     if abs(x - y) < 1e-12 or abs(multiplier) < 1 - 1e-9:
         return points, multiplier  # sitting on it exactly, or it attracts
     if abs(abs(multiplier) - 1.0) < 1e-6:

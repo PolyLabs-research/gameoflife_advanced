@@ -40,6 +40,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass
+from functools import cache
 
 import numpy as np
 
@@ -53,6 +54,7 @@ from latticelife.core.translations import (
     TorusTranslations,
     canonical_key,
     key_extent,
+    point_group,
 )
 from latticelife.experiments.harness import (
     append_jsonl,
@@ -139,6 +141,14 @@ def _hexagonal_hull_extent(key: PatternKey) -> tuple[int, int, int, int]:
     return min(rows), min(cols), max(rows), max(cols)
 
 
+def _extent(key: PatternKey, shape: str) -> tuple[int, int, int, int]:
+    """The offset bounding box a pattern is given room for: on hexagons that of its hexagonal
+    hull (`_hexagonal_hull_extent`), elsewhere its own."""
+    if shape == "hexagon":
+        return _hexagonal_hull_extent(key)
+    return key_extent(key)
+
+
 def _own_torus(
     key: PatternKey, shape: str, triangle_mode: str, margin: int
 ) -> tuple[TorusTranslations, int, int]:
@@ -146,14 +156,22 @@ def _own_torus(
     (so the fit check below has a whole half-torus of slack), even-sized, at least the shape's
     smallest wrappable size; and the origin that places the key `margin` cells from the top
     left, on a cell the key's frame allows (an even column; even row + column on triangles).
-    On hexagons the extent is that of the key's hexagonal hull (`_hexagonal_hull_extent`), so
-    a pattern that only rearranges itself inside its hull is never called too large."""
-    if shape == "hexagon" and key:
-        min_r, min_c, max_r, max_c = _hexagonal_hull_extent(key)
-    else:
+
+    On hexagons the extent is that of the key's hexagonal hull, so a pattern that only
+    rearranges itself inside its hull is never called too large. The size is the largest such
+    extent over every orientation of the key (`point_group`), so that a pattern and its
+    rotations get the same torus."""
+    if not key:
         min_r, min_c, max_r, max_c = key_extent(key)
-    height = 2 * (max_r - min_r + 1 + margin)
-    width = 2 * (max_c - min_c + 1 + margin)
+        span_r, span_c = max_r - min_r, max_c - min_c
+    else:
+        min_r, min_c, max_r, max_c = _extent(key, shape)
+        span_r = span_c = 0
+        for g in point_group(shape):
+            r0, c0, r1, c1 = _extent(tuple(g(cell) for cell in key), shape)
+            span_r, span_c = max(span_r, r1 - r0), max(span_c, c1 - c0)
+    height = 2 * (span_r + 1 + margin)
+    width = 2 * (span_c + 1 + margin)
     min_width, min_height = min_wrap_size(shape, triangle_mode)
     height, width = max(height, min_height), max(width, min_width)
     height += height % 2
@@ -167,19 +185,32 @@ def _own_torus(
 
 
 def _fits(translations: TorusTranslations, cells: np.ndarray) -> bool:
-    """Whether `cells` lie within a window smaller than half the torus each way from every cell,
-    so they cannot reach round the torus to touch themselves and `pattern_key` can name them
-    from any anchor. The window is read from the first cell. On hexagons, moving a pattern by an
-    odd number of columns (as `pattern_key` does to anchor it at another cell) shifts its odd
-    columns one row against its even ones, so a row span one short of half the torus from one
-    cell can be half the torus from another: there the row span must stay one row shorter."""
+    """Whether `pattern_key` can name `cells`: from every cell taken as anchor, the cells span
+    less than half the torus each way, so they do not reach round it to touch themselves.
+
+    Spans are read as `pattern_key` reads them, in the window centred on the anchor. Moving a
+    pattern by an even number of columns shifts every row alike, so on hexagons there are only
+    two frames to check, one anchored in an even column and one in an odd one: moving by an odd
+    number of columns shifts odd columns a row against even ones. Square and triangle
+    translations are plain shifts, so one frame suffices there."""
     width, height = translations.width, translations.height
-    rows = (cells // width - cells[0] // width) % height
-    cols = (cells % width - cells[0] % width) % width
-    rows = np.where(rows > height // 2, rows - height, rows)
-    cols = np.where(cols > width // 2, cols - width, cols)
-    row_limit = height // 2 - (1 if translations.shape == "hexagon" else 0)
-    return bool(rows.max() - rows.min() < row_limit and cols.max() - cols.min() < width // 2)
+    anchors = [int(cells[0])]
+    if translations.shape == "hexagon":
+        other = cells[(cells % width) % 2 != (cells[0] % width) % 2]
+        if other.size:
+            anchors.append(int(other[0]))
+    for anchor in anchors:
+        vector = translations.between(anchor, 0)
+        if vector is None:  # a triangle of the other orientation: anchor it at (0, 1)
+            vector = translations.between(anchor, 1)
+        moved = translations.apply(cells, vector)
+        rows = moved // width
+        cols = moved % width
+        rows = np.where(rows > height // 2, rows - height, rows)
+        cols = np.where(cols > width // 2, cols - width, cols)
+        if rows.max() - rows.min() >= height // 2 or cols.max() - cols.min() >= width // 2:
+            return False
+    return True
 
 
 def identify(
@@ -376,64 +407,77 @@ def _as_key(cells: Iterable[Iterable[int]]) -> PatternKey:
     return tuple((int(r), int(c)) for r, c in cells)
 
 
+@cache
+def _reidentified(
+    rule: str, shape: str, triangle_mode: str, key: PatternKey, period: int
+) -> ObjectRecord:
+    """An object from a record written before canonical keys and rule ranges were recorded,
+    identified again from its key (a phase on its cycle, so `period` steps settle it)."""
+    again = identify(key, Rule.from_bs_string(rule), shape, triangle_mode, max_period=period)
+    assert isinstance(again, ObjectRecord), (rule, key, again)
+    return again
+
+
+def _resolved(record: dict, found: dict) -> dict:
+    """`found` with its canonical key and rule range, recovered by re-identifying it when the
+    record predates them."""
+    if "canonical_key" in found and "rule_min" in found:
+        return found
+    again = _reidentified(
+        record["rule"],
+        record["shape"],
+        record.get("triangle_mode") or "edge+vertex",
+        _as_key(found["key"]),
+        int(found["period"]),
+    )
+    return {**found, **{k: v for k, v in again.to_json().items() if k not in found}}
+
+
 def catalogue(records: Iterable[dict], up_to_symmetry: bool = False) -> list[dict]:
     """The objects seen across soup records, most common first: one entry per distinct object
-    with its kind, period, displacement, population, rule range when recorded, how many times it
-    appeared (`count`) and under how many distinct rules (`rules`).
+    with its kind, period, displacement, population, rule range, how many times it appeared
+    (`count`) and under how many distinct rules (`rules`).
 
     An entry is one orbit. Up to translation that is the key, the behaviour (kind, period and
     displacement: one pattern can be a still life under one rule and oscillate under another) and
-    the rule range when the records carry it. With `up_to_symmetry` it is the canonical key and
-    the rule range: the same phase shapes can belong to different orbits under different rules,
-    and two orbits through the same phase part ways at a transition one makes and the other
-    does not, so their ranges differ. A spaceship is one entry whichever way it travels; the
-    entry shows the displacement of the first orientation seen. Records written before
-    canonical keys and rule ranges were recorded get them by re-identifying the object under
-    its rule (once per rule and key)."""
+    the rule range. With `up_to_symmetry` it is the canonical key and the rule range: the same
+    phase shapes can belong to different orbits under different rules, and two orbits through
+    the same phase part ways at a transition one makes and the other does not, so their ranges
+    differ. A spaceship is one entry whichever way it travels; the entry shows the displacement
+    of the first orientation seen. Records written before canonical keys and rule ranges were
+    recorded get them by re-identifying the object under its rule, once per rule and key across
+    calls, so files mixing old and new records count each object once in either mode."""
     counts: Counter[tuple] = Counter()
     rules: dict[tuple, set[str]] = {}
     details: dict[tuple, dict] = {}
-    recomputed: dict[tuple, ObjectRecord] = {}
     for record in records:
-        for found in record["objects"]:
-            if not up_to_symmetry:
-                identity = (_as_key(found["key"]), found.get("rule_min"), found.get("rule_max"))
-                rule_range = found
-            elif "canonical_key" in found and "rule_min" in found:
-                identity = (_as_key(found["canonical_key"]), found["rule_min"], found["rule_max"])
-                rule_range = found
-            else:
-                cache_key = (record["rule"], _as_key(found["key"]))
-                if cache_key not in recomputed:
-                    again = identify(
-                        _as_key(found["key"]),
-                        Rule.from_bs_string(record["rule"]),
-                        record["shape"],
-                        record.get("triangle_mode") or "edge+vertex",
-                        max_period=int(found["period"]),
-                    )
-                    assert isinstance(again, ObjectRecord), (cache_key, again)
-                    recomputed[cache_key] = again
-                again = recomputed[cache_key]
-                identity = (again.canonical_key, again.rule_min, again.rule_max)
-                rule_range = again.to_json()
+        for raw in record["objects"]:
+            found = _resolved(record, raw)
+            key = _as_key(found["canonical_key"] if up_to_symmetry else found["key"])
             # A spaceship's displacement turns with it, so up to symmetry it is not part of
             # the identity: the canonical key and rule range already fix the orbit.
             motion = () if up_to_symmetry else tuple(found["displacement"])
-            entry = (identity, found["kind"], found["period"], motion)
+            entry = (
+                key,
+                found["rule_min"],
+                found["rule_max"],
+                found["kind"],
+                found["period"],
+                motion,
+            )
             counts[entry] += 1
             rules.setdefault(entry, set()).add(record["rule"])
             details.setdefault(
                 entry,
                 {
-                    "key": [list(cell) for cell in identity[0]],
+                    "key": [list(cell) for cell in key],
                     "kind": found["kind"],
                     "period": found["period"],
                     "displacement": found["displacement"],
                     "population": found["population"],
-                    "rule_min": rule_range.get("rule_min"),
-                    "rule_max": rule_range.get("rule_max"),
-                    "rule_count": rule_range.get("rule_count"),
+                    "rule_min": found["rule_min"],
+                    "rule_max": found["rule_max"],
+                    "rule_count": found["rule_count"],
                 },
             )
     return [

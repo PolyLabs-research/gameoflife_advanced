@@ -392,3 +392,52 @@ def test_catalogue_counts_a_spaceship_once_up_to_symmetry_whichever_way_it_trave
     assert len(catalogue(records)) == 6  # six directions of travel
     merged = catalogue(records, up_to_symmetry=True)
     assert [(e["kind"], e["count"], e["rule_count"]) for e in merged] == [("spaceship", 12, 16)]
+
+
+def test_the_fit_check_is_exact_on_hexagons_not_one_row_short():
+    """A uniform one-row slack (the first fix for the pattern_key crash) also threw away objects
+    that fit from every anchor: a period-17 oscillator under B256/S346 was too_large at margin
+    8. The check now reads both column-parity frames, as pattern_key does."""
+    seed = ((-2, -1), (-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 0))  # small-search seed 208
+    found = identify(seed, Rule({2, 5, 6}, {3, 4, 6}), "hexagon", margin=8)
+    assert not isinstance(found, str)
+    assert (found.kind, found.period, found.population, found.max_population) == (
+        "oscillator",
+        17,
+        6,
+        36,
+    )
+
+
+def test_a_pattern_and_its_rotations_get_the_same_verdict():
+    """The object's torus is sized over every orientation of the seed, so a seed near the size
+    limit is not named in one orientation and called too large in another."""
+    from latticelife.core.translations import point_group, transform_key
+
+    seed = ((-4, -5), (-2, 0), (-1, 0), (0, 0))
+    rule = Rule({2, 4, 5}, {1, 2, 4, 6})
+    verdicts = {
+        _summary(identify(transform_key(seed, g, "hexagon"), rule, "hexagon", 120, 4))
+        for g in point_group("hexagon")
+    }
+    assert len(verdicts) == 1
+
+
+def _summary(found):
+    return found if isinstance(found, str) else (found.kind, found.period, found.canonical_key)
+
+
+def test_catalogue_counts_an_object_once_when_old_and_new_records_mix():
+    domino = ((-1, 0), (0, 0))
+    new = identify(domino, Rule({2}, set()), "hexagon").to_json()
+    old = {
+        k: v
+        for k, v in new.items()
+        if k not in ("canonical_key", "rule_min", "rule_max", "rule_count")
+    }
+    records = [
+        {"rule": "B2/S", "shape": "hexagon", "objects": [old]},
+        {"rule": "B2/S", "shape": "hexagon", "objects": [new]},
+    ]
+    assert [e["count"] for e in catalogue(records)] == [2]
+    assert [e["count"] for e in catalogue(records, up_to_symmetry=True)] == [2]
