@@ -121,14 +121,37 @@ def harvest(grid: LatticeGrid, lifeform_id: int = 1, radius: int = 2) -> list[np
     )
 
 
+def _hexagonal_hull_extent(key: PatternKey) -> tuple[int, int, int, int]:
+    """The offset bounding box (min_row, min_col, max_row, max_col) of `key`'s hexagonal hull:
+    every cell whose axial q, r and s = -q - r lie within the key's ranges of each. A rule
+    without 0, 1 or 2 in B never births a cell outside this hull, but a pattern can grow inside
+    it well past its own offset bounding box (a one-row zigzag's hull is a tall hexagon)."""
+    axial = [(c, r - (c - (c & 1)) // 2) for r, c in key]
+    qs = [q for q, _ in axial]
+    rs = [r for _, r in axial]
+    ss = [-q - r for q, r in axial]
+    rows, cols = [], []
+    for q in range(min(qs), max(qs) + 1):
+        for r in range(min(rs), max(rs) + 1):
+            if min(ss) <= -q - r <= max(ss):
+                rows.append(r + (q - (q & 1)) // 2)
+                cols.append(q)
+    return min(rows), min(cols), max(rows), max(cols)
+
+
 def _own_torus(
     key: PatternKey, shape: str, triangle_mode: str, margin: int
 ) -> tuple[TorusTranslations, int, int]:
     """A torus with room for `key` to move and grow: twice its extent plus margins each way
     (so the fit check below has a whole half-torus of slack), even-sized, at least the shape's
     smallest wrappable size; and the origin that places the key `margin` cells from the top
-    left, on a cell the key's frame allows (an even column; even row + column on triangles)."""
-    min_r, min_c, max_r, max_c = key_extent(key)
+    left, on a cell the key's frame allows (an even column; even row + column on triangles).
+    On hexagons the extent is that of the key's hexagonal hull (`_hexagonal_hull_extent`), so
+    a pattern that only rearranges itself inside its hull is never called too large."""
+    if shape == "hexagon" and key:
+        min_r, min_c, max_r, max_c = _hexagonal_hull_extent(key)
+    else:
+        min_r, min_c, max_r, max_c = key_extent(key)
     height = 2 * (max_r - min_r + 1 + margin)
     width = 2 * (max_c - min_c + 1 + margin)
     min_width, min_height = min_wrap_size(shape, triangle_mode)
@@ -363,8 +386,10 @@ def catalogue(records: Iterable[dict], up_to_symmetry: bool = False) -> list[dic
     the rule range when the records carry it. With `up_to_symmetry` it is the canonical key and
     the rule range: the same phase shapes can belong to different orbits under different rules,
     and two orbits through the same phase part ways at a transition one makes and the other
-    does not, so their ranges differ. Records written before canonical keys and rule ranges were
-    recorded get them by re-identifying the object under its rule (once per rule and key)."""
+    does not, so their ranges differ. A spaceship is one entry whichever way it travels; the
+    entry shows the displacement of the first orientation seen. Records written before
+    canonical keys and rule ranges were recorded get them by re-identifying the object under
+    its rule (once per rule and key)."""
     counts: Counter[tuple] = Counter()
     rules: dict[tuple, set[str]] = {}
     details: dict[tuple, dict] = {}
@@ -392,7 +417,10 @@ def catalogue(records: Iterable[dict], up_to_symmetry: bool = False) -> list[dic
                 again = recomputed[cache_key]
                 identity = (again.canonical_key, again.rule_min, again.rule_max)
                 rule_range = again.to_json()
-            entry = (identity, found["kind"], found["period"], tuple(found["displacement"]))
+            # A spaceship's displacement turns with it, so up to symmetry it is not part of
+            # the identity: the canonical key and rule range already fix the orbit.
+            motion = () if up_to_symmetry else tuple(found["displacement"])
+            entry = (identity, found["kind"], found["period"], motion)
             counts[entry] += 1
             rules.setdefault(entry, set()).add(record["rule"])
             details.setdefault(

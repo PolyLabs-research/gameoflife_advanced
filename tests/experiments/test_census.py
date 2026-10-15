@@ -231,3 +231,39 @@ def test_census_records_carry_the_mean_field_attractor(config):
     assert (record.mean_field_attractor, record.mean_field_period) == ([0.0], 1)
     assert record.mean_field == [0.0, 1.0]
     assert isinstance(record.mean_field_lyapunov, float)
+
+
+@pytest.mark.parametrize(
+    ("rule", "period", "values"),
+    [
+        # A fixed point approached with multiplier -0.997: not a one-value 2-cycle.
+        ("B15/S15", 1, [0.306375]),
+        # A fifth-order root at 1 the orbit creeps onto like t^(-1/4): exactly 1, not 0.999.
+        ("B2/S23456", 1, [1.0]),
+        # A triple root at 1/2 that root finding used to split into 0.499996.
+        ("B346/S1456", 1, [0.5]),
+    ],
+)
+def test_mean_field_orbit_finds_slow_and_multiple_root_attractors_exactly(rule, period, values):
+    orbit = mean_field_orbit(Rule.from_bs_string(rule), 6, 0.5)
+    assert (orbit["period"], orbit["values"]) == (period, values)
+    assert 0.5 in mean_field_fixed_points(Rule.from_bs_string("B346/S1456"), 6)[0]
+
+
+def test_a_slowly_attracting_24_cycle_is_found_at_its_minimal_period():
+    """Its multiplier is -0.9925, so float orbits settle into a 48-step rounding pattern around
+    it; the cycle itself has period 24 and attracts."""
+    orbit = mean_field_orbit(Rule.from_bs_string("B1234/S02"), 6, 0.5)
+    assert orbit["period"] == 24 and len(orbit["values"]) == 24
+    assert orbit["lyapunov"] < 0
+
+
+def test_a_soup_at_density_one_half_sits_on_its_map_even_when_unstable():
+    """f(1/2) is Langton's lambda, so a lambda = 1/2 rule's map stays at 1/2 exactly; the
+    positive Lyapunov exponent says the point repels."""
+    rule = Rule.from_bs_string("B12/S01236")
+    assert langton_lambda(rule, 6) == 0.5
+    orbit = mean_field_orbit(rule, 6, 0.5)
+    assert (orbit["period"], orbit["values"]) == (1, [0.5])
+    assert orbit["lyapunov"] > 0
+    assert mean_field_orbit(Rule.from_bs_string("B3456/S256"), 6, 0.5)["lyapunov"] < 0

@@ -71,14 +71,31 @@ map to a live cell. The mean-field density map
 `f(rho) = (1-rho) P[Bin(n,rho) in B] + rho P[Bin(n,rho) in S]` knows only the degree, so its
 disagreement with `rho_final` measures how much the spatial arrangement matters for that rule.
 Compare a run with `mean_field_attractor`, the attractor the map reaches from `--density`
-(`mean_field_period` values, sorted; empty with period null when the orbit does not close
-within 64 steps), not with the stable fixed points `mean_field` lists: a rule can have several,
-and the soup's starting density picks one. B6/S56 has stable points 0 and 1 and the map sends 0.5
-to 0, and a rule with B0 and without S6 has no stable fixed point at all while its map strobes
-between 0 and 1 as its soup does. Fixed points at 0 and 1 are exact (0 when 0 is not in B, 1
-when n is in S), and an orbit creeping onto a neutral one (|f'| = 1, such as 1 for B2/S23456) is
-reported as converging there. `mean_field_lyapunov` is the orbit's Lyapunov exponent: positive
-for a chaotic map.
+(`mean_field_period` values, sorted; empty with period null when no cycle of period up to 64
+attracts the orbit), not with the stable fixed points `mean_field` lists: a rule can have
+several, and the soup's starting density picks one. B6/S56 has stable points 0 and 1 and the map
+sends 0.5 to 0, and a rule with B0 and without S6 has no stable fixed point at all while its map
+strobes between 0 and 1. Two exact facts help reading these fields. f(1/2) is Langton's lambda,
+so from density 1/2 the map's first step lands on lambda, and a rule with lambda = 1/2 sits on
+1/2 for ever, stable or not. And the dual's map is x -> 1 - f(1 - x).
+
+Fixed points are exact: 0 and 1 are divided out of the integer polynomial f(rho) - rho, and the
+interior ones are the roots of its square-free part, so a multiple root (a triple root at 1/2 for
+B346/S1456) is found once and exactly. The attractor is found by refining the orbit's first
+near-return with Newton's method on f^p(y) = y, so a cycle approached slowly (multipliers up to
+0.9996 occur) is reported exactly at its minimal period, and an orbit creeping onto a neutral
+fixed point (|f'| = 1, such as 1 for B2/S23456, approached like t^(-1/4)) is reported as reaching
+it. `mean_field_lyapunov` is log|m| / period for a cycle with multiplier m, the product of f'
+round it: negative when the cycle attracts, 0 when it is neutral, positive only for an orbit
+sitting exactly on an unstable fixed point (130 hexagon rules with lambda = 1/2). With no cycle it
+is the average of log|f'| along the orbit: positive for a chaotic map.
+
+On the hexagon census, mean field from 1/2 lands within 0.05 of the soup's tail density for
+about three rules in four, and mostly where the soup does not settle (chaotic soups are well
+mixed, as mean field assumes). Where it misses, the soup has usually frozen into a configuration
+held together by spatial correlations, at a density that is no fixed point of the map: under
+B/S123456 every configuration is fixed after one step, while the map decays to 0. Where the map
+lands on a 2-cycle, soups match the cycle's mean density, not its oscillation.
 
 `--rules` takes `all`, `dual`, `random:N` or a list of B/S strings. Several `--grid` sizes in
 one run give the period spectrum as a function of torus size.
@@ -112,7 +129,7 @@ object found, and how many components were not objects, by reason.
 | `spaceship`  | returns displaced: speed is `displacement` per `period`   |
 | `died`       | nothing left                                              |
 | `unsettled`  | no repeat within `--max-period` generations               |
-| `too_large`  | grew to span half its torus (self-interaction across the seam), less one row on hexagons; a larger `--margin` gives more room |
+| `too_large`  | grew to span half its torus (self-interaction across the seam), less one row on hexagons; a larger `--margin` gives more room. On hexagons the torus is sized from the pattern's hexagonal hull, which a rule without 0, 1 or 2 in B never grows beyond |
 
 An object's `key` names it up to translation: the cells of its fewest-cell phase relative to one
 of them, the smallest such list over every choice of anchor (ties between phases go to the
@@ -170,6 +187,16 @@ translations: up and down triangles are not translates of each other. The test s
 every translation is an automorphism of the adjacency array for every shape over a range of
 sizes, which is the property the object census relies on.
 
+Soups are a weak spaceship detector. A ship is reported only if it survives to the end of the
+run, but on a crowded torus a ship meets ash and dies within a hundred or so generations (a c/5
+ship planted in a settled B2/S35 soup at density 0.3 survives 100 more generations about one time
+in ten, and 300 never), and a sparse rule's soup settles within a few hundred generations. A ship
+whose phase falls apart into radius-2 fragments at the moment of harvest is also reported as its
+fragments: the B25/S256 period-16 ship splits that way at 3 of its 16 phases. To find ships, run
+`objects.identify` on many small seeds, or search for them directly; to show none exist, prove it
+(on the hexagon lattice, a rule without 2 in B has none, since nothing is ever born outside a
+pattern's hexagonal hull).
+
 ## Caveats
 
 - Everything here is single-species. With several species the birth tie-break is random, a
@@ -180,3 +207,8 @@ sizes, which is the property the object census relies on.
   torus-level periods; the `soup` command names them.
 - Mean-field fixed points describe an infinite, well-mixed system; a finite torus can sit at a
   density mean field calls unstable.
+- A census holds one rule per dual pair. Statistics over the whole rule space need the duals
+  added (density 1 - rho, lambda 1 - lambda, extinct and full density swapped, periods kept);
+  counting representatives alone skews them, since the representative is the member with the
+  smaller masks. A dual's record derived this way describes the complemented soup, so it equals
+  a census run of the dual in distribution, not seed for seed.

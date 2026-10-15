@@ -33,6 +33,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass
+from fractions import Fraction
 
 from numpy.polynomial import Polynomial
 
@@ -113,15 +114,53 @@ def mean_field_map(rule: Rule, n: int) -> Polynomial:
     return empty * birth + rho * survive
 
 
+def _poly_divmod(numerator: list[Fraction], divisor: list[Fraction]):
+    """Exact long division of polynomials (coefficients lowest degree first)."""
+    remainder = list(numerator)
+    quotient = [Fraction(0)] * max(len(numerator) - len(divisor) + 1, 1)
+    while len(remainder) >= len(divisor) and any(remainder):
+        shift = len(remainder) - len(divisor)
+        factor = remainder[-1] / divisor[-1]
+        quotient[shift] = factor
+        for i, c in enumerate(divisor):
+            remainder[shift + i] -= factor * c
+        while remainder and remainder[-1] == 0:
+            remainder.pop()
+    return quotient, remainder
+
+
+def _poly_gcd(a: list[Fraction], b: list[Fraction]) -> list[Fraction]:
+    while b and any(b):
+        _, r = _poly_divmod(a, b)
+        a, b = b, r
+    return [c / a[-1] for c in a]
+
+
+def _square_free(coefficients: list[int]) -> list[float]:
+    """The square-free part g / gcd(g, g') of an integer polynomial, as floats: the same roots,
+    each simple, so numerical root finding is accurate even where g has a multiple root."""
+    g = [Fraction(c) for c in coefficients]
+    derivative = [i * c for i, c in enumerate(g)][1:]
+    if not any(derivative):
+        return [float(c) for c in g]
+    common = _poly_gcd(g, derivative)
+    part, _ = _poly_divmod(g, common)
+    while part and part[-1] == 0:
+        part.pop()
+    return [float(c) for c in part]
+
+
 def mean_field_fixed_points(rule: Rule, n: int) -> tuple[list[float], list[float]]:
     """(all fixed points, the stable ones) of `mean_field_map` in [0, 1], rounded to 6 places.
-    Stable means |f'(rho*)| < 1. The identity rule (nothing is born, everything survives) fixes
-    every density; it gets ([], []).
+    Stable means |f'(rho*)| < 1; a multiple root of f(rho) - rho has f' = 1 and is not stable.
+    The identity rule (nothing is born, everything survives) fixes every density; it gets
+    ([], []).
 
-    0 and 1 are fixed points exactly when 0 is not in B and n is in S, often as multiple roots
-    of f(rho) - rho (B4/S3456 has a triple root at 1), which numerical root finding splits into
-    spurious points such as 0.999993. The polynomial's coefficients are integers, so those roots
-    are divided out exactly first and only the interior roots are found numerically."""
+    f(rho) - rho has integer coefficients, and multiple roots are common (B4/S3456 has a triple
+    root at 1, B346/S1456 one at 1/2), which numerical root finding splits into spurious points
+    such as 0.999993. So roots at 0 and 1 are divided out exactly (0 is one when 0 is not in B,
+    1 when n is in S), and the interior roots are found from the exact square-free part, where
+    every root is simple."""
     f = mean_field_map(rule, n)
     g = f - Polynomial([0.0, 1.0])
     coefficients = [round(c) for c in g.coef]  # integers: exact in floating point too
@@ -143,7 +182,8 @@ def mean_field_fixed_points(rule: Rule, n: int) -> tuple[list[float], list[float
         coefficients = quotient
         if 1.0 not in fixed:
             fixed.append(1.0)
-    for root in Polynomial(coefficients).roots() if len(coefficients) > 1 else []:
+    interior = _square_free(coefficients) if len(coefficients) > 1 else []
+    for root in Polynomial(interior).roots() if len(interior) > 1 else []:
         if abs(root.imag) > 1e-7:
             continue
         value = float(root.real)
@@ -157,71 +197,113 @@ def mean_field_fixed_points(rule: Rule, n: int) -> tuple[list[float], list[float
     return fixed, stable
 
 
+def _horner(coefficients: list[float], x: float) -> float:
+    value = 0.0
+    for c in coefficients:
+        value = value * x + c
+    return value
+
+
 def mean_field_orbit(
-    rule: Rule, n: int, rho0: float = 0.5, transient: int = 4000, max_period: int = 64
+    rule: Rule, n: int, rho0: float = 0.5, transient: int = 20_000, max_period: int = 64
 ) -> dict:
-    """Where the mean-field map goes from `rho0`: after `transient` iterations, the attractor's
-    `period` and its `values` (sorted, 6 decimals), or period None and no values when the orbit
-    has not closed within `max_period` steps (chaotic, or quasi-periodic), plus the orbit's
-    Lyapunov exponent over the next 1,000 iterations (`lyapunov`; positive for chaos, very
-    negative for a superstable cycle). An orbit still creeping monotonically onto a neutral fixed
-    point (|f'| = 1, as at 0 or 1 for rules such as B2/S23456, where the distance to 1 shrinks
-    like t^(-1/4)) is reported as that fixed point: f(x) - x keeps its sign up to the next fixed
-    point and f increases on the way, so the orbit converges to it."""
+    """Where the mean-field map goes from `rho0`: the attractor's `period` and its `values`
+    (sorted, 6 decimals), or period None and no values when no cycle of period up to
+    `max_period` attracts the orbit (chaos, or a longer cycle); and `lyapunov`, the orbit's
+    Lyapunov exponent. For a cycle that is log|m| / period, where m is the cycle's multiplier
+    (the product of f' around it): negative when the cycle attracts, 0 when it is neutral, and
+    positive only when the orbit sits exactly on an unstable cycle, as every rule with
+    lambda = 1/2 does at 1/2 (f(1/2) = lambda: a soup at density 1/2 is a fixed point of its own
+    map, stable or not). Without a cycle it is the average of log|f'| along 5,000 steps.
+
+    After `transient` steps, the first period p at which the orbit nearly returns is refined by
+    Newton's method on f^p(y) = y, so a cycle the orbit approaches slowly (multipliers up to
+    0.9996 occur) is still found exactly, at its minimal period, and an orbit creeping onto a
+    neutral cycle (|m| = 1: 1 for B2/S23456, where the distance to 1 shrinks like t^(-1/4), or
+    the 0-1 strobe for some B0 rules) is reported as reaching it."""
     f = mean_field_map(rule, n)
     coefficients = [float(c) for c in f.coef][::-1]
     slope = [float(c) for c in f.deriv().coef][::-1]
 
-    def horner(coefs: list[float], x: float) -> float:
-        value = 0.0
-        for c in coefs:
-            value = value * x + c
-        return value
-
     def step(x: float) -> float:
-        return min(1.0, max(0.0, horner(coefficients, x)))
+        return min(1.0, max(0.0, _horner(coefficients, x)))
 
     x = float(rho0)
     for _ in range(transient):
         x = step(x)
     orbit = [x]
-    period = None
-    y = x
-    for p in range(1, max_period + 1):
-        y = step(y)
-        if abs(y - x) < 1e-9:
-            period = p
-            break
-        orbit.append(y)
-    lyapunov = 0.0
+    for _ in range(2 * max_period):
+        orbit.append(step(orbit[-1]))
+    exact, _ = mean_field_fixed_points(rule, n)
+    for period in range(1, max_period + 1):
+        if abs(orbit[period] - x) > 1e-4:
+            continue
+        cycle = _refine_cycle(x, period, step, slope, orbit, exact)
+        if cycle is not None:
+            values, multiplier = cycle
+            lyapunov = math.log(max(abs(multiplier), 1e-300)) / len(values)
+            return {
+                "period": len(values),
+                "values": sorted({round(v, 6) for v in values}),
+                "lyapunov": round(max(lyapunov, -50.0), 4),
+            }
+    total = 0.0
     z = x
-    for _ in range(1000):
-        lyapunov += math.log(max(abs(horner(slope, z)), 1e-12))
+    for _ in range(5000):
+        total += math.log(max(abs(_horner(slope, z)), 1e-12))
         z = step(z)
-    lyapunov /= 1000
-    if period is None:
-        target = _creeping_onto(x, step, horner, slope, rule, n)
-        if target is not None:
-            return {"period": 1, "values": [target], "lyapunov": round(lyapunov, 4)}
-        return {"period": None, "values": [], "lyapunov": round(lyapunov, 4)}
-    values = sorted({round(v, 6) for v in orbit[:period]})
-    return {"period": period, "values": values, "lyapunov": round(lyapunov, 4)}
+    return {"period": None, "values": [], "lyapunov": round(total / 5000, 4)}
 
 
-def _creeping_onto(x, step, horner, slope, rule: Rule, n: int) -> float | None:
-    """The fixed point an orbit at `x` converges onto monotonically, or None: the next fixed
-    point in the direction f(x) - x points, if the map increases all the way there (sampled)."""
-    drift = step(x) - x
-    if drift == 0.0 or abs(drift) > 1e-4:
+def _refine_cycle(x, period, step, slope, orbit, exact) -> tuple[list[float], float] | None:
+    """The cycle of `period` near `x` that the orbit (`orbit`, starting at `x`) is reaching, as
+    (its points from the one nearest `x`, its multiplier), at its minimal period; or None.
+    `exact` lists the map's exact fixed points: at a multiple root Newton converges only
+    linearly and its residual vanishes before the point is reached (|f(y) - y| < 1e-14 at
+    1 - y = 8e-4 for the fifth-order root of B2/S23456), so a fixed point or the 0-1 strobe it
+    stalls next to is snapped onto."""
+    y = x
+    for _ in range(400):  # Newton on f^p(y) - y; linear, not quadratic, at a multiple root
+        value, derivative = y, 1.0
+        for _ in range(period):
+            derivative *= _horner(slope, value)
+            value = step(value)
+        residual = value - y
+        if abs(residual) < 1e-14:
+            break
+        if abs(derivative - 1.0) < 1e-15:
+            break
+        y_next = min(1.0, max(0.0, y - residual / (derivative - 1.0)))
+        if y_next == y:
+            break
+        y = y_next
+    points = [y]
+    for _ in range(period - 1):
+        points.append(step(points[-1]))
+    if abs(step(points[-1]) - y) > 1e-10:
         return None
-    fixed, _ = mean_field_fixed_points(rule, n)
-    ahead = [p for p in fixed if (p - x) * drift > 0]
-    if not ahead:
-        return None
-    target = min(ahead, key=lambda p: abs(p - x))
-    samples = [x + (target - x) * i / 64 for i in range(65)]
-    if all(horner(slope, y) > 0 for y in samples):
-        return target
+    for divisor in range(1, period):
+        if period % divisor == 0 and abs(points[divisor] - y) < 1e-10:
+            points = points[:divisor]
+            break
+    if len(points) == 1:
+        nearest = min(exact, key=lambda p: abs(p - points[0]), default=None)
+        if nearest is not None and abs(nearest - points[0]) < 1e-3:
+            points = [nearest]
+    elif len(points) == 2 and step(0.0) == 1.0 and step(1.0) == 0.0:
+        if min(abs(points[0]), abs(1 - points[0])) < 1e-3:
+            points = [float(round(points[0])), 1.0 - round(points[0])]
+    y = points[0]
+    multiplier = 1.0
+    for point in points:
+        multiplier *= _horner(slope, point)
+    if abs(x - y) < 1e-12 or abs(multiplier) < 1 - 1e-9:
+        return points, multiplier  # sitting on it exactly, or it attracts
+    if abs(abs(multiplier) - 1.0) < 1e-6:
+        # Neutral: accept only if the orbit really is closing in on it.
+        gaps = [abs(orbit[k * len(points)] - y) for k in range(len(orbit) // len(points))]
+        if all(b <= a for a, b in zip(gaps, gaps[1:], strict=False)):
+            return points, multiplier
     return None
 
 

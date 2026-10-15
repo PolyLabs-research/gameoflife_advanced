@@ -367,3 +367,28 @@ def test_a_hexagon_object_near_half_its_torus_never_crashes_the_naming():
         30,
     )
     assert (found.rule_min, found.rule_max, found.rule_count) == ("B25/S26", "B25/S26", 1)
+
+
+def test_a_long_thin_hexagon_pattern_is_not_too_large_while_it_stays_in_its_hull():
+    """A rule without 0, 1 or 2 in B never births outside a pattern's hexagonal hull, but a
+    one-row pattern grows to fill its hull, a tall hexagon. The object's torus is sized from the
+    hull, so the row settles into a still life instead of being called too large."""
+    row = tuple((0, c) for c in range(-15, 1))
+    found = identify(row, Rule({3}, {2, 3}), "hexagon", margin=8)
+    assert not isinstance(found, str)
+    assert (found.kind, found.period) == ("still", 1)
+
+
+def test_catalogue_counts_a_spaceship_once_up_to_symmetry_whichever_way_it_travels():
+    from latticelife.core.translations import point_group, transform_key
+
+    ship = ((-3, -2), (-3, -1), (-3, 0), (-2, 1), (-1, 0), (0, 0))  # c/3 under B24/S245
+    rule = Rule({2, 4}, {2, 4, 5})
+    found = [
+        identify(transform_key(ship, g, "hexagon"), rule, "hexagon") for g in point_group("hexagon")
+    ]
+    assert {(f.kind, f.period, f.rule_count) for f in found} == {("spaceship", 3, 16)}
+    records = [{"rule": "B24/S245", "shape": "hexagon", "objects": [f.to_json() for f in found]}]
+    assert len(catalogue(records)) == 6  # six directions of travel
+    merged = catalogue(records, up_to_symmetry=True)
+    assert [(e["kind"], e["count"], e["rule_count"]) for e in merged] == [("spaceship", 12, 16)]
