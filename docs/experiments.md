@@ -172,6 +172,8 @@ size, the mean final damage and the share of runs that healed.
 | `transient` | census, sweep | rule, torus, density    | median settling time, bootstrap 95%        |
 | `survival`  | sweep         | + steps                 | share alive at `steps - 1`, Wilson 95%     |
 | `damage`    | damage        | + steps, flips, warmup  | mean final damage, bootstrap 95%           |
+| `first_repeat` | census, sweep | rule, torus, density | each seed's time, exact or a bound; Kaplan-Meier median |
+| `extinction`   | sweep         | rule, torus, density | the same, and the seeds that can never die |
 
 A seed's settling time is its exact transient (for a soup that dies on a rule with 0 not in B,
 the generation it died). Records of one seed at different caps are merged: runs are
@@ -182,6 +184,16 @@ disagree are an error. A `transient` row with a seed that never repeated is not 
 square root of the cell count, so square and rectangular tori share one axis. The bootstrap is
 seeded: the same records always give the same rows. `observables.density_series` reads the mean
 density over time of single-species sessions from an `autorun` database.
+
+`first_repeat` and `extinction` are for fitting a law to times some of which are only bounds (a
+censored likelihood, such as Kepler's `likelihood="censored"`), rather than to a median that a
+cap may have turned into a guess. A run that hit its cap bounds transient + period, not the
+transient: so the first repeated state (generation transient + period) is the time a cap
+censors exactly. Each row lists every seed's `times` with `is_censored` (True: the time exceeds
+the number given). For `extinction`, the first generation with no live cell, a run that settled
+on a cycle with live cells can never die: it is listed in `never_seeds`, not as a bound. The
+Kaplan-Meier median (`km_median`) is null when the censoring, or the runs that never die, leave
+it unknown; `median_above` then says what it exceeds.
 
 `experiments.cost` prices a task before it runs: generations times cells (a cap, so an upper
 bound), and seconds from `measure_seconds_per_step` on this machine.

@@ -16,8 +16,9 @@ here, under the version that makes it.
 - `experiments.damage`: `DamageTask`, `DamageRecord`, `damage_point`, `run_damage`,
   `RECORD_KEY`
 - `experiments.observables`: `median_transient`, `survival`, `density_series`,
-  `damage_spread`, `settling_time`, `no_repeat_before`, `bootstrap_interval`,
-  `wilson_interval`, and the rows `TransientRow`, `SurvivalRow`, `DensityRow`, `DamageRow`
+  `damage_spread`, `event_times`, `settling_time`, `no_repeat_before`, `first_repeat_time`,
+  `extinction_outcome`, `kaplan_meier_median`, `bootstrap_interval`, `wilson_interval`, and the
+  rows `TransientRow`, `SurvivalRow`, `DensityRow`, `DamageRow`, `EventTimeRow`
 - `experiments.cost`: `CostHint`, `cost_hint`, `task_cost`, `measure_seconds_per_step`
 
 Record files are append-only JSONL. A new field may be added to a record; an existing field is
@@ -26,6 +27,12 @@ documented default (see `observables.no_repeat_before`).
 
 ## Unreleased
 
+- **Event times** (`observables.event_times`, `latticelife observe first_repeat|extinction`):
+  each seed's time to its first repeated state (transient + period, the quantity a cap really
+  bounds) or to extinction, exact or a lower bound, for fitting with a censored likelihood. Runs
+  that settle on a living cycle are counted apart as never dying. Rows give a Kaplan-Meier
+  median. New stable names: `event_times`, `first_repeat_time`, `extinction_outcome`,
+  `kaplan_meier_median`, `EventTimeRow`.
 - **Observables** (`experiments.observables`, `latticelife observe`): records become numbers
   with uncertainty and stated limits. `median_transient` (median settling time per torus, a
   seeded bootstrap 95% interval, seeds and unsettled seeds), `survival` (share alive per size

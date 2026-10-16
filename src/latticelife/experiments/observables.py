@@ -18,6 +18,15 @@ median could be, and `unsettled_seeds` names the seeds to rerun with a larger ca
 `steps - 1`, with a Wilson score interval. Every sweep run's fate is exact, so nothing here is
 censored.
 
+`event_times`: per size and density, each seed's time to an event, exact or only a bound, for a
+fit that uses both (a censored likelihood). The event is `first_repeat`, the first generation
+whose state repeats an earlier one (transient + period: the quantity a cap really bounds, since
+an unsettled run has a long transient *or* a long period), or `extinction`, the first generation
+with no live cell (sweep records only). For extinction there is a third kind of seed: one settled
+on a cycle with live cells in every state can never die, and is counted apart (`never`), not
+treated as a bound. Each row carries the Kaplan-Meier median for people, None when the
+censoring leaves it unknown.
+
 `density_series`: mean density over time, averaged over single-species sessions with the same
 rule, lattice and torus, read from an `autorun` database (schema v2).
 
@@ -238,6 +247,168 @@ def median_transient(
                 max_cap=max(caps) if caps else None,
                 unsettled_seeds=open_seeds,
                 settling_times=times,
+            )
+        )
+    return rows
+
+
+# --- event times ----------------------------------------------------------------------------
+
+EVENTS = ("first_repeat", "extinction")
+
+
+def first_repeat_time(record: dict) -> int | None:
+    """The first generation whose state equals an earlier one's (transient + period), or None
+    when no state repeated within the cap (it then exceeds `no_repeat_before`). A soup absorbed
+    into the empty grid at generation e, on a rule without birth from nothing, repeats at e + 1."""
+    record = _as_dict(record)
+    if record.get("period") is not None and record.get("transient") is not None:
+        return int(record["transient"]) + int(record["period"])
+    time = settling_time(record)
+    return None if time is None else time + 1
+
+
+def extinction_outcome(record: dict) -> tuple[str, int | None]:
+    """How one sweep run ends: ("died", e) with e the first generation with no live cell;
+    ("never", None) for a run settled on a cycle with live cells in every state, which can never
+    die; ("alive", g) for a run alive through generation g, the last it stepped, with its fate
+    unsettled (it dies after g, or never). Census records keep no extinction step: ValueError."""
+    record = _as_dict(record)
+    if "extinction_step" not in record:
+        raise ValueError(
+            "extinction times need sweep records (census records keep no extinction step)"
+        )
+    if record["extinction_step"] is not None:
+        return "died", int(record["extinction_step"])
+    if record.get("period") is not None:
+        return "never", None
+    return "alive", int(record["stopped_at"])
+
+
+@dataclass(frozen=True)
+class EventTimeRow:
+    rule: str
+    shape: str
+    triangle_mode: str | None
+    grid: GridLabel
+    width: int
+    height: int
+    cells: int
+    size: float
+    density: float
+    event: str  # "first_repeat" or "extinction"
+    seeds: int
+    events: int  # seeds whose time is exact
+    censored: int  # seeds known only to take longer than a bound
+    never: int  # seeds that can never reach the event (extinction only)
+    km_median: float | None  # Kaplan-Meier median over all seeds; None when not reached
+    median_above: float | None  # when not reached: the median exceeds this
+    seed_list: list[int] = field(default_factory=list)  # seeds with a time or a bound, sorted
+    times: list[int] = field(default_factory=list)  # each one's exact time, or its bound
+    is_censored: list[bool] = field(default_factory=list)  # True: the time exceeds `times`
+    never_seeds: list[int] = field(default_factory=list)
+
+    def to_json(self) -> dict:
+        return asdict(self)
+
+
+def kaplan_meier_median(
+    times: Sequence[float], censored: Sequence[bool], never: int = 0
+) -> float | None:
+    """The Kaplan-Meier median of event times where `censored` marks lower bounds and `never`
+    more runs can never have the event: the first event time at which the share still waiting
+    falls to one half. None when it never does within the data."""
+    order = sorted(zip(times, censored, strict=True), key=lambda tc: (tc[0], tc[1]))  # events first
+    at_risk = len(order) + never
+    waiting = 1.0
+    i = 0
+    while i < len(order):
+        t = order[i][0]
+        deaths = leaving = 0
+        while i < len(order) and order[i][0] == t:
+            deaths += not order[i][1]
+            leaving += 1
+            i += 1
+        if deaths:
+            waiting *= 1.0 - deaths / at_risk
+            if waiting <= 0.5 + 1e-12:
+                return float(t)
+        at_risk -= leaving
+    return None
+
+
+def event_times(records: Iterable[dict], event: str = "first_repeat") -> list[EventTimeRow]:
+    """Per (rule, shape, triangle mode, torus, density): each seed's time to `event`, exact or a
+    bound (see the module docstring). Records of one seed at different caps merge: an exact
+    time from any of them wins (and they must agree), otherwise the largest bound."""
+    if event not in EVENTS:
+        raise ValueError(f"event must be one of {', '.join(EVENTS)} (got {event!r})")
+    groups: dict[tuple, dict[int, dict]] = {}
+    for record in records:
+        data = _as_dict(record)
+        key = (
+            data["rule"],
+            data["shape"],
+            data.get("triangle_mode"),
+            parse_grid(data["grid"]),
+            float(data["density"]),
+        )
+        seed = int(data["seed"])
+        state = groups.setdefault(key, {}).setdefault(
+            seed, {"kind": None, "time": None, "bound": None}
+        )
+        if event == "first_repeat":
+            time = first_repeat_time(data)
+            kind = "died" if time is not None else "alive"
+            value = time if time is not None else no_repeat_before(data)
+        else:
+            kind, value = extinction_outcome(data)
+        if kind == "alive":
+            state["bound"] = value if state["bound"] is None else max(state["bound"], value)
+            continue
+        if state["kind"] is not None and (state["kind"], state["time"]) != (kind, value):
+            raise ValueError(
+                f"seed {seed} of {key} ended as {state['kind']} {state['time']} in one record and "
+                f"{kind} {value} in another; deterministic runs must agree"
+            )
+        state["kind"], state["time"] = kind, value
+
+    rows = []
+    for key in sorted(groups, key=lambda k: (k[0], k[1], str(k[2]), grid_sort_key(k[3]), k[4])):
+        rule, shape, triangle_mode, grid, density = key
+        seeds = groups[key]
+        seed_list, times, flags, never_seeds = [], [], [], []
+        for seed, state in sorted(seeds.items()):
+            if state["kind"] == "never":
+                never_seeds.append(seed)
+            elif state["kind"] == "died":
+                seed_list.append(seed)
+                times.append(state["time"])
+                flags.append(False)
+            else:
+                seed_list.append(seed)
+                times.append(state["bound"])
+                flags.append(True)
+        median = kaplan_meier_median(times, flags, len(never_seeds))
+        rows.append(
+            EventTimeRow(
+                rule=rule,
+                shape=shape,
+                triangle_mode=triangle_mode,
+                grid=grid,
+                **_geometry(grid),
+                density=density,
+                event=event,
+                seeds=len(seeds),
+                events=flags.count(False),
+                censored=flags.count(True),
+                never=len(never_seeds),
+                km_median=median,
+                median_above=None if median is not None or not times else float(max(times)),
+                seed_list=seed_list,
+                times=times,
+                is_censored=flags,
+                never_seeds=never_seeds,
             )
         )
     return rows

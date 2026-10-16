@@ -986,6 +986,12 @@ def test_observe_prints_one_row_per_setting(tmp_path, log_dir, capsys):
     assert cli.main(["observe", "survival", str(out), "--rule", "B3/S23"]) == 0
     assert capsys.readouterr().out == ""
 
+    for event in ("first_repeat", "extinction"):
+        assert cli.main(["observe", event, str(out)]) == 0
+        rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert len(rows) == 4 and all(r["event"] == event for r in rows)
+        assert all(r["events"] + r["censored"] + r["never"] == 3 for r in rows)
+
 
 def test_observe_reports_a_missing_file_or_field_in_one_line(tmp_path, log_dir, capsys):
     assert cli.main(["observe", "transient", str(tmp_path / "missing.jsonl")]) == 2

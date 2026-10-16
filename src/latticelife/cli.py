@@ -256,9 +256,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     observe_parser.add_argument(
         "quantity",
-        choices=("transient", "survival", "damage"),
+        choices=("transient", "survival", "damage", "first_repeat", "extinction"),
         help="transient: median settling time (census or sweep files); survival: share alive "
-        "(sweep); damage: final damage (damage)",
+        "(sweep); damage: final damage (damage); first_repeat, extinction: each seed's time, "
+        "exact or a bound (first_repeat: census or sweep; extinction: sweep)",
     )
     observe_parser.add_argument("files", nargs="+", type=Path, help="JSONL record files")
     observe_parser.add_argument("--rule", default=None, help="only records of this B/S rule")
@@ -792,6 +793,8 @@ def run_observe(args: argparse.Namespace) -> int:
             rows = observables.median_transient(records)
         elif args.quantity == "survival":
             rows = observables.survival(records)
+        elif args.quantity in observables.EVENTS:
+            rows = observables.event_times(records, args.quantity)
         else:
             rows = observables.damage_spread(records)
     except KeyError as exc:
