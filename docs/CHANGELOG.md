@@ -21,6 +21,7 @@ here, under the version that makes it.
   `bootstrap_interval`, `wilson_interval`, and the rows `TransientRow`, `SurvivalRow`,
   `DensityRow`, `DamageRow`, `EventTimeRow`, `CurveRow`, `ObjectSizeRow`
 - `experiments.cost`: `CostHint`, `cost_hint`, `task_cost`, `measure_seconds_per_step`
+- `experiments.series`: `count_series`
 
 Record files are append-only JSONL. A new field may be added to a record; an existing field is
 never renamed, retyped or given a new meaning. Readers treat a missing new field as its
@@ -28,6 +29,10 @@ documented default (see `observables.no_repeat_before`).
 
 ## Unreleased
 
+- **Counts over time** (`experiments.series.count_series`): live cells, cumulative births and
+  deaths, and live and dead cells by live-neighbour count at every generation of one run, for a
+  search for conserved quantities. Four bookkeeping identities hold by construction and are
+  tested.
 - **Replicate curves and size samples** (`observables.damage_curves`, `observables.object_sizes`;
   `latticelife observe damage_curves|object_sizes`): every seed's whole damage curve, for a law
   over time with seed-to-seed error bars, and every object's population and each distinct

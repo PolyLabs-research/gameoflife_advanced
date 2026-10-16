@@ -203,6 +203,11 @@ Kepler's `fit_replicates` does), never from the scatter about the mean. `object_
 every soup's objects: `populations` for the distribution of sizes, `abundances` (how often each
 distinct object appeared, most common first) for the distribution of abundances.
 
+`experiments.series.count_series` records, for one run, the live cells, cumulative births and
+deaths, and live and dead cells by live-neighbour count at every generation: integer columns for
+a search for conserved quantities. Its bookkeeping identities (live = live(0) + births - deaths,
+and three more) are what such a search should find first on any rule.
+
 `experiments.cost` prices a task before it runs: generations times cells (a cap, so an upper
 bound), and seconds from `measure_seconds_per_step` on this machine.
 

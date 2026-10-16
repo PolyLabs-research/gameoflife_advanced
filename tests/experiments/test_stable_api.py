@@ -67,6 +67,7 @@ SIGNATURES = {
     "observables.extinction_outcome": ["record"],
     "observables.kaplan_meier_median": ["times", "censored", "never"],
     "observables.damage_curves": ["records"],
+    "series.count_series": ["config", "rule", "shape", "grid", "density", "seed", "steps"],
     "observables.object_sizes": ["records"],
     "cost.task_cost": ["task", "seconds_per_step"],
     "cost.measure_seconds_per_step": [
