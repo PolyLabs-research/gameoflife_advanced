@@ -17,8 +17,9 @@ here, under the version that makes it.
   `RECORD_KEY`
 - `experiments.observables`: `median_transient`, `survival`, `density_series`,
   `damage_spread`, `event_times`, `settling_time`, `no_repeat_before`, `first_repeat_time`,
-  `extinction_outcome`, `kaplan_meier_median`, `bootstrap_interval`, `wilson_interval`, and the
-  rows `TransientRow`, `SurvivalRow`, `DensityRow`, `DamageRow`, `EventTimeRow`
+  `extinction_outcome`, `kaplan_meier_median`, `damage_curves`, `object_sizes`,
+  `bootstrap_interval`, `wilson_interval`, and the rows `TransientRow`, `SurvivalRow`,
+  `DensityRow`, `DamageRow`, `EventTimeRow`, `CurveRow`, `ObjectSizeRow`
 - `experiments.cost`: `CostHint`, `cost_hint`, `task_cost`, `measure_seconds_per_step`
 
 Record files are append-only JSONL. A new field may be added to a record; an existing field is
@@ -27,6 +28,11 @@ documented default (see `observables.no_repeat_before`).
 
 ## Unreleased
 
+- **Replicate curves and size samples** (`observables.damage_curves`, `observables.object_sizes`;
+  `latticelife observe damage_curves|object_sizes`): every seed's whole damage curve, for a law
+  over time with seed-to-seed error bars, and every object's population and each distinct
+  object's count, for a distribution fit. New stable names: `damage_curves`, `object_sizes`,
+  `CurveRow`, `ObjectSizeRow`.
 - **Event times** (`observables.event_times`, `latticelife observe first_repeat|extinction`):
   each seed's time to its first repeated state (transient + period, the quantity a cap really
   bounds) or to extinction, exact or a lower bound, for fitting with a censored likelihood. Runs

@@ -174,6 +174,8 @@ size, the mean final damage and the share of runs that healed.
 | `damage`    | damage        | + steps, flips, warmup  | mean final damage, bootstrap 95%           |
 | `first_repeat` | census, sweep | rule, torus, density | each seed's time, exact or a bound; Kaplan-Meier median |
 | `extinction`   | sweep         | rule, torus, density | the same, and the seeds that can never die |
+| `damage_curves` | damage       | + steps, flips, warmup | every seed's damage curve (replicates)   |
+| `object_sizes`  | soup         | rule, torus, density, steps | every object's population; each object's count |
 
 A seed's settling time is its exact transient (for a soup that dies on a rule with 0 not in B,
 the generation it died). Records of one seed at different caps are merged: runs are
@@ -194,6 +196,12 @@ the number given). For `extinction`, the first generation with no live cell, a r
 on a cycle with live cells can never die: it is listed in `never_seeds`, not as a bound. The
 Kaplan-Meier median (`km_median`) is null when the censoring, or the runs that never die, leave
 it unknown; `median_above` then says what it exceeds.
+
+`damage_curves` keeps each seed's curve whole. Points along one curve are correlated, so a law
+over time fitted to the mean curve should take its error bars from resampling whole seeds (as
+Kepler's `fit_replicates` does), never from the scatter about the mean. `object_sizes` pools
+every soup's objects: `populations` for the distribution of sizes, `abundances` (how often each
+distinct object appeared, most common first) for the distribution of abundances.
 
 `experiments.cost` prices a task before it runs: generations times cells (a cap, so an upper
 bound), and seconds from `measure_seconds_per_step` on this machine.

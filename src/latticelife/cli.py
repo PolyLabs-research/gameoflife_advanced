@@ -256,10 +256,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     observe_parser.add_argument(
         "quantity",
-        choices=("transient", "survival", "damage", "first_repeat", "extinction"),
+        choices=(
+            "transient",
+            "survival",
+            "damage",
+            "first_repeat",
+            "extinction",
+            "damage_curves",
+            "object_sizes",
+        ),
         help="transient: median settling time (census or sweep files); survival: share alive "
         "(sweep); damage: final damage (damage); first_repeat, extinction: each seed's time, "
-        "exact or a bound (first_repeat: census or sweep; extinction: sweep)",
+        "exact or a bound (first_repeat: census or sweep; extinction: sweep); damage_curves: "
+        "each seed's damage curve (damage); object_sizes: object populations (soup)",
     )
     observe_parser.add_argument("files", nargs="+", type=Path, help="JSONL record files")
     observe_parser.add_argument("--rule", default=None, help="only records of this B/S rule")
@@ -795,6 +804,10 @@ def run_observe(args: argparse.Namespace) -> int:
             rows = observables.survival(records)
         elif args.quantity in observables.EVENTS:
             rows = observables.event_times(records, args.quantity)
+        elif args.quantity == "damage_curves":
+            rows = observables.damage_curves(records)
+        elif args.quantity == "object_sizes":
+            rows = observables.object_sizes(records)
         else:
             rows = observables.damage_spread(records)
     except KeyError as exc:

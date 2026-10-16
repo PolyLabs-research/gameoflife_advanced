@@ -31,7 +31,11 @@ censoring leaves it unknown.
 rule, lattice and torus, read from an `autorun` database (schema v2).
 
 `damage_spread`: per size and density, the mean final fraction of damaged cells over seeds, with
-a bootstrap interval, and the share of runs that healed.
+a bootstrap interval, and the share of runs that healed. `damage_curves`: every seed's whole
+damage curve, as replicates for a law over time whose error bars come from resampling seeds.
+
+`object_sizes`: from `soup` records, the population of every object found and how often each
+distinct object appeared, as samples for a distribution fit (power law, lognormal, ...).
 
 The bootstrap is seeded (`bootstrap_seed`), so the same records always give the same rows.
 Rows are frozen dataclasses with `to_json()`; `size` is the square root of the cell count, the
@@ -656,18 +660,165 @@ def damage_spread(
     return rows
 
 
+@dataclass(frozen=True)
+class CurveRow:
+    rule: str
+    shape: str
+    triangle_mode: str | None
+    grid: GridLabel
+    width: int
+    height: int
+    cells: int
+    size: float
+    density: float
+    steps: int
+    flips: int
+    warmup: int
+    seeds: list[int] = field(default_factory=list)
+    curves: list[list[float]] = field(default_factory=list)  # per seed: damaged share by generation
+
+    def to_json(self) -> dict:
+        return asdict(self)
+
+
+def damage_curves(records: Iterable[dict]) -> list[CurveRow]:
+    """Per (rule, shape, triangle mode, torus, density, steps, flips, warmup): every seed's whole
+    damage curve, the share of cells in which the twins differ at generations 0..steps-1. These
+    are replicates: points along one curve are correlated, so a law fitted to their mean takes
+    its error bars from resampling whole curves, not from the scatter about the mean."""
+    groups: dict[tuple, dict[int, list[float]]] = {}
+    for record in records:
+        data = _as_dict(record)
+        key = (
+            data["rule"],
+            data["shape"],
+            data.get("triangle_mode"),
+            parse_grid(data["grid"]),
+            float(data["density"]),
+            int(data["steps"]),
+            int(data["flips"]),
+            int(data["warmup"]),
+        )
+        curve = [d / int(data["cells"]) for d in data["differing"]]
+        seeds = groups.setdefault(key, {})
+        seed = int(data["seed"])
+        if seed in seeds and seeds[seed] != curve:
+            raise ValueError(f"seed {seed} of {key} has two different curves; runs must agree")
+        seeds[seed] = curve
+    rows = []
+    for key in sorted(groups, key=lambda k: (k[0], k[1], str(k[2]), grid_sort_key(k[3]), k[4:])):
+        rule, shape, triangle_mode, grid, density, steps, flips, warmup = key
+        seeds = groups[key]
+        rows.append(
+            CurveRow(
+                rule=rule,
+                shape=shape,
+                triangle_mode=triangle_mode,
+                grid=grid,
+                **_geometry(grid),
+                density=density,
+                steps=steps,
+                flips=flips,
+                warmup=warmup,
+                seeds=sorted(seeds),
+                curves=[seeds[s] for s in sorted(seeds)],
+            )
+        )
+    return rows
+
+
+# --- objects --------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ObjectSizeRow:
+    rule: str
+    shape: str
+    triangle_mode: str | None
+    grid: GridLabel
+    width: int
+    height: int
+    cells: int
+    size: float
+    density: float
+    steps: int
+    soups: int
+    objects: int  # objects identified, over every soup
+    unidentified: int  # components that were not objects (died, unsettled, too large)
+    populations: list[int] = field(default_factory=list)  # each object's cells, smallest phase
+    abundances: list[int] = field(default_factory=list)  # times each distinct object was seen
+
+    def to_json(self) -> dict:
+        return asdict(self)
+
+
+def object_sizes(records: Iterable[dict]) -> list[ObjectSizeRow]:
+    """Per (rule, shape, triangle mode, torus, density, steps), from `soup` records: the
+    population of every object found, and how often each distinct object appeared (most common
+    first), the samples for asking which distribution sizes and abundances follow. A seed recorded
+    twice counts once."""
+    groups: dict[tuple, dict[int, dict]] = {}
+    for record in records:
+        data = _as_dict(record)
+        key = (
+            data["rule"],
+            data["shape"],
+            data.get("triangle_mode"),
+            parse_grid(data["grid"]),
+            float(data["density"]),
+            int(data["steps"]),
+        )
+        groups.setdefault(key, {})[int(data["seed"])] = data
+    rows = []
+    for key in sorted(groups, key=lambda k: (k[0], k[1], str(k[2]), grid_sort_key(k[3]), k[4:])):
+        rule, shape, triangle_mode, grid, density, steps = key
+        soups = list(groups[key].values())
+        found = [o for soup in soups for o in soup["objects"]]
+        counts: dict[tuple, int] = {}
+        for o in found:
+            k = tuple(tuple(cell) for cell in o["key"])
+            counts[k] = counts.get(k, 0) + 1
+        rows.append(
+            ObjectSizeRow(
+                rule=rule,
+                shape=shape,
+                triangle_mode=triangle_mode,
+                grid=grid,
+                **_geometry(grid),
+                density=density,
+                steps=steps,
+                soups=len(soups),
+                objects=len(found),
+                unidentified=sum(sum(soup["unidentified"].values()) for soup in soups),
+                populations=sorted(int(o["population"]) for o in found),
+                abundances=sorted(counts.values(), reverse=True),
+            )
+        )
+    return rows
+
+
 __all__ = [
     "BOOTSTRAP_RESAMPLES",
     "CONFIDENCE",
+    "EVENTS",
+    "CurveRow",
     "DamageRow",
     "DensityRow",
+    "EventTimeRow",
+    "ObjectSizeRow",
     "SurvivalRow",
     "TransientRow",
     "bootstrap_interval",
+    "damage_curves",
     "damage_spread",
     "density_series",
+    "event_times",
+    "extinction_outcome",
+    "first_repeat_time",
+    "kaplan_meier_median",
     "median_transient",
     "no_repeat_before",
+    "object_sizes",
     "settling_time",
     "survival",
     "wilson_interval",
