@@ -6,9 +6,13 @@ scaling of those thresholds.
 Each run is a single species with exact cycle detection, so it stops early as soon as its
 outcome is settled: when the grid is empty and the empty grid is absorbing (0 not in B), or when
 a state repeats (then every later state, and the population at generation `steps - 1`, is
-known: `rho_final` is read off the cycle). A rule with 0 in B is never cut short by emptiness,
-since its empty grid fills with births; its `survived` is simply whether cells are alive at the
-last planned generation.
+known: `rho_final` is read off the cycle). A run that does neither within `steps` generations
+records `no_repeat_before = stopped_at`: no state among generations 0..stopped_at repeated, so
+its transient + period exceeds `stopped_at`. That bounds the two together, not the transient
+alone: the run may have settled long ago onto a cycle too long to close within the cap. Its
+`survived` is still exact (it ran every generation). A rule with 0 in B is never cut short by
+emptiness, since its empty grid fills with births; its `survived` is simply whether cells are
+alive at the last planned generation.
 
 Analysis helpers: `survival_table` turns records into P(survive) per (size, density);
 `critical_densities` finds where P crosses 1/2 (there can be two: a soup too sparse to start and
@@ -28,8 +32,11 @@ from latticelife.config import Config
 from latticelife.core.geometries import max_degree
 from latticelife.core.rules import Rule
 from latticelife.experiments.harness import (
+    GridLabel,
     append_jsonl,
+    grid_sort_key,
     map_tasks,
+    parse_grid,
     resume_keys,
     single_species_session,
 )
@@ -44,7 +51,7 @@ class SweepRecord:
     rule: str
     shape: str
     triangle_mode: str | None
-    grid: int
+    grid: GridLabel  # 32 for a 32x32 torus, "24x26" for a rectangle
     density: float
     seed: int
     steps: int
@@ -54,6 +61,9 @@ class SweepRecord:
     period: int | None
     transient: int | None
     stopped_at: int  # the last generation actually stepped
+    # Only for a run whose fate was not settled (no repeat, not absorbed into the empty grid):
+    # no state among generations 0..no_repeat_before repeated, so transient + period exceeds it.
+    no_repeat_before: int | None = None
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -64,7 +74,7 @@ class SweepTask:
     config: Config
     rule: str
     shape: str
-    grid: int
+    grid: GridLabel
     density: float
     seed: int
     steps: int
@@ -97,6 +107,7 @@ def sweep_session(session: SimulationSession, steps: int) -> dict:
             period, transient = repeat
             break
     last = steps - 1
+    absorbed = absorbing_empty and rho[-1] == 0
     if last < len(rho):
         rho_final = rho[last]
     elif period is not None:
@@ -110,6 +121,7 @@ def sweep_session(session: SimulationSession, steps: int) -> dict:
         "period": period,
         "transient": transient,
         "stopped_at": stopped_at,
+        "no_repeat_before": None if period is not None or absorbed else stopped_at,
     }
 
 
@@ -124,7 +136,7 @@ def sweep_point(task: SweepTask) -> SweepRecord:
         rule=rule.to_bs_string(n),
         shape=task.shape,
         triangle_mode=triangle_mode if task.shape == "triangle" else None,
-        grid=task.grid,
+        grid=parse_grid(task.grid),
         density=task.density,
         seed=task.seed,
         steps=task.steps,
@@ -136,7 +148,7 @@ def run_sweep(
     config: Config,
     rule: Rule,
     shape: str,
-    grids: Sequence[int],
+    grids: Sequence[int | str],
     densities: Sequence[float],
     seeds: Sequence[int],
     steps: int,
@@ -144,14 +156,14 @@ def run_sweep(
     workers: int = 1,
 ) -> Iterator[SweepRecord]:
     """Every (grid, density, seed) not already recorded in `out_path`, appended to it as it
-    finishes and yielded."""
+    finishes and yielded. `grids` are torus sizes: `32`, or `"24x26"` for a rectangle."""
     n = max_degree(shape, config.grid.triangle_mode)
     rule_text = rule.to_bs_string(n)
     triangle_mode = config.grid.triangle_mode if shape == "triangle" else None
     done = resume_keys(out_path, RECORD_KEY)
     tasks = [
         SweepTask(config, rule_text, shape, grid, float(density), seed, steps)
-        for grid in grids
+        for grid in (parse_grid(g) for g in grids)
         for density in densities
         for seed in seeds
         if (rule_text, shape, triangle_mode, grid, float(density), seed, steps) not in done
@@ -163,16 +175,17 @@ def run_sweep(
 
 def survival_table(
     records: Iterable[SweepRecord | dict],
-) -> dict[int, list[tuple[float, float, int]]]:
-    """Per torus size, `(density, P(survive), runs)` sorted by density."""
-    counts: dict[tuple[int, float], list[int]] = {}
+) -> dict[GridLabel, list[tuple[float, float, int]]]:
+    """Per torus size (by cell count), `(density, P(survive), runs)` sorted by density."""
+    counts: dict[tuple[GridLabel, float], list[int]] = {}
     for record in records:
         data = record if isinstance(record, dict) else record.to_json()
-        cell = counts.setdefault((int(data["grid"]), float(data["density"])), [0, 0])
+        cell = counts.setdefault((parse_grid(data["grid"]), float(data["density"])), [0, 0])
         cell[0] += int(bool(data["survived"]))
         cell[1] += 1
-    table: dict[int, list[tuple[float, float, int]]] = {}
-    for (grid, density), (survived, runs) in sorted(counts.items()):
+    table: dict[GridLabel, list[tuple[float, float, int]]] = {}
+    ordered = sorted(counts.items(), key=lambda item: (grid_sort_key(item[0][0]), item[0][1]))
+    for (grid, density), (survived, runs) in ordered:
         table.setdefault(grid, []).append((density, survived / runs, runs))
     return table
 

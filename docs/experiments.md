@@ -1,7 +1,8 @@
 # Mathematics experiments
 
-Three headless commands turn the simulator into an instrument for exact, exhaustive results on
-the non-square lattices, where prior work is thin. Each runs one species on wrapped tori, so the
+Four headless commands turn the simulator into an instrument for exact, exhaustive results on
+the non-square lattices, where prior work is thin, and `observe` turns their records into
+numbers with uncertainty. Each runs one species on wrapped tori, so the
 dynamics are deterministic given the seed and every period reported is exact (a state seen
 twice), never inferred from a density trace.
 
@@ -9,9 +10,16 @@ twice), never inferred from a density trace.
 uv run python -m latticelife.cli census --shape hexagon --rules dual --grid 32 --steps 500
 uv run python -m latticelife.cli sweep  --shape hexagon --rule B2/S34 --grid 16 32 64 --seeds 20
 uv run python -m latticelife.cli soup   --shape hexagon --rule B2/S34 --grid 64 --seeds 50
+uv run python -m latticelife.cli damage --shape hexagon --rule B2/S34 --grid 32 --seeds 20
+uv run python -m latticelife.cli observe transient out/sweep-hexagon-B2S34.jsonl
 ```
 
-All three append one JSON record per task to a JSONL file as the task finishes (default
+`--grid` takes `L` for a square torus or `WxH` for a rectangle (`--grid 24x26`), so sizes between
+squares can be sampled where a quantity changes fast. Records name a square torus by its side
+(`32`) and a rectangle by `"24x26"`. The wrap rules still apply: a hexagon torus needs an even
+width, a triangle torus an even width and height.
+
+All four append one JSON record per task to a JSONL file as the task finishes (default
 `out/<command>-<shape>[-<rule>].jsonl` under the config's project root, or `--out PATH`), skip
 the tasks already in that file when started again, report progress on stderr every 100 records,
 and print a JSON summary on stdout. Ctrl+C, SIGTERM or SIGHUP stop a run with everything finished
@@ -23,8 +31,20 @@ command itself. Argument problems that depend on each other (a count above the l
 a torus size the shape cannot wrap) are one line on stderr with exit status 2.
 
 The modules behind the commands (`latticelife.experiments.census`, `sweeps`, `objects`,
-`periodicity`, and `latticelife.core.translations`) are importable for scripting and notebooks,
-with the same functions the commands call.
+`damage`, `observables`, `cost`, `periodicity`, and `latticelife.core.translations`) are
+importable for scripting and notebooks, with the same functions the commands call. The ones
+other projects rely on are listed, and kept stable, in [CHANGELOG.md](CHANGELOG.md).
+
+### When a run does not repeat
+
+A run that reaches its cap without a repeated state records `no_repeat_before`: the last
+generation it reached, with no state among generations 0..`no_repeat_before` seen twice. That
+bounds the transient and the period *together* (transient + period > `no_repeat_before`), not
+the transient alone: the run may have settled long ago onto a cycle longer than the cap. So
+"never repeated within the cap" is not "a long transient", and a settling time measured on such a
+run is not a measurement. Settled records leave the field null. It is set by `census`
+(`outcome: unsettled`), `sweep` (a run neither repeated nor absorbed into the empty grid) and
+`soup` (the soup itself).
 
 ## Rule spaces
 
@@ -132,12 +152,50 @@ translations: up and down triangles are not translates of each other. The test s
 every translation is an automorphism of the adjacency array for every shape over a range of
 sizes, which is the property the object census relies on.
 
+## `damage`: how far one flipped cell's effect spreads
+
+For one rule: at each (torus size, initial density, seed), a soup runs `--warmup` generations,
+is copied, `--flips` random cells of the copy are flipped, and both twins are stepped for
+`--steps` generations side by side (the method discovery scores rules with). Each record holds
+`differing`, the number of cells in which the twins differ at every generation, its `final` and
+`peak` fractions, and `healed_at`, the first generation at which the twins agree again: they then
+agree for ever, since single-species dynamics are deterministic. The summary gives, per torus
+size, the mean final damage and the share of runs that healed.
+
+## `observe`: numbers with uncertainty
+
+`latticelife observe QUANTITY FILE... [--rule R]` prints one JSON row per setting
+(`experiments.observables`):
+
+| quantity    | from          | per                     | value and interval                         |
+|-------------|---------------|-------------------------|--------------------------------------------|
+| `transient` | census, sweep | rule, torus, density    | median settling time, bootstrap 95%        |
+| `survival`  | sweep         | + steps                 | share alive at `steps - 1`, Wilson 95%     |
+| `damage`    | damage        | + steps, flips, warmup  | mean final damage, bootstrap 95%           |
+
+A seed's settling time is its exact transient (for a soup that dies on a rule with 0 not in B,
+the generation it died). Records of one seed at different caps are merged: runs are
+deterministic, so a seed that settled under any cap is settled, and two settled records that
+disagree are an error. A `transient` row with a seed that never repeated is not `complete`: its
+`median` is null, `median_at_least` and `median_at_most` bound what the median could be, and
+`unsettled_seeds` lists the seeds to rerun with a larger `--steps`. Rows carry `size`, the
+square root of the cell count, so square and rectangular tori share one axis. The bootstrap is
+seeded: the same records always give the same rows. `observables.density_series` reads the mean
+density over time of single-species sessions from an `autorun` database.
+
+`experiments.cost` prices a task before it runs: generations times cells (a cap, so an upper
+bound), and seconds from `measure_seconds_per_step` on this machine.
+
 ## Caveats
 
 - Everything here is single-species. With several species the birth tie-break is random, a
   repeated state proves nothing, and `run_timeseries(detect_cycles=True)` refuses.
 - `unsettled` is relative to the run length: a transient of 1,000 generations on a 32x32 torus
-  is not chaos. Compare several `--steps` before calling a rule chaotic.
+  is not chaos. Compare several `--steps` before calling a rule chaotic, and read
+  `no_repeat_before` as a bound on transient + period, never on the transient alone.
+- The smallest tori can mislead about growth with size: on the settling-time prototype they
+  alone gave a false "logarithmic" verdict for every rule. Check a size dependence with the
+  smallest sizes left out.
 - A census at one torus size sees that size's cycles. Spaceships and gliders show up as long
   torus-level periods; the `soup` command names them.
 - Mean-field fixed points describe an infinite, well-mixed system; a finite torus can sit at a

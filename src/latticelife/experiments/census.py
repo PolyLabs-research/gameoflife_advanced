@@ -12,6 +12,8 @@ finite system, not a guess from the density trace:
 - `periodic`: a state repeated after more than one step, with the exact `period` and the
   generation the cycle began (`transient`);
 - `unsettled`: no state repeated within `steps` — chaotic, or a transient longer than the run.
+  Such a record has `no_repeat_before = steps - 1`: its transient + period exceeds that, which
+  bounds the two together, not the transient alone.
 
 Beside the measured behaviour each record carries two things computable from the rule alone,
 for the analysis to set against it: Langton's lambda (the fraction of the 2^(n+1) neighbourhood
@@ -35,8 +37,10 @@ from latticelife.config import Config
 from latticelife.core.geometries import max_degree
 from latticelife.core.rules import Rule
 from latticelife.experiments.harness import (
+    GridLabel,
     append_jsonl,
     map_tasks,
+    parse_grid,
     resume_keys,
     single_species_session,
 )
@@ -138,7 +142,7 @@ class RuleRecord:
     rule: str
     shape: str
     triangle_mode: str | None
-    grid: int
+    grid: GridLabel  # 32 for a 32x32 torus, "24x26" for a rectangle
     steps: int
     seed: int
     density: float
@@ -156,6 +160,8 @@ class RuleRecord:
     langton_lambda: float
     mean_field: list[float]  # stable fixed points of the mean-field map
     dual: str
+    # Only when no state repeated: none among generations 0..no_repeat_before did.
+    no_repeat_before: int | None = None
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -166,7 +172,7 @@ class CensusTask:
     config: Config
     rule: str
     shape: str
-    grid: int
+    grid: GridLabel
     steps: int
     seed: int
     density: float
@@ -216,6 +222,7 @@ def classify_session(session: SimulationSession, steps: int, tail: int = 50) -> 
         "changed_final": changed_final,
         "cluster_count": clusters.cluster_count,
         "max_cluster_size": clusters.max_cluster_size,
+        "no_repeat_before": steps - 1 if series.period is None else None,
     }
 
 
@@ -234,7 +241,7 @@ def classify_rule(task: CensusTask) -> RuleRecord:
         rule=rule.to_bs_string(n),
         shape=task.shape,
         triangle_mode=triangle_mode if task.shape == "triangle" else None,
-        grid=task.grid,
+        grid=parse_grid(task.grid),
         steps=task.steps,
         seed=task.seed,
         density=task.density,
@@ -249,17 +256,18 @@ def census_tasks(
     config: Config,
     shape: str,
     rules: Iterable[Rule],
-    grids: Sequence[int],
+    grids: Sequence[int | str],
     seeds: Sequence[int],
     steps: int,
     density: float,
     tail: int,
 ) -> list[CensusTask]:
     n = max_degree(shape, config.grid.triangle_mode)
+    labels = [parse_grid(grid) for grid in grids]
     return [
         CensusTask(config, rule.to_bs_string(n), shape, grid, steps, seed, density, tail)
         for rule in rules
-        for grid in grids
+        for grid in labels
         for seed in seeds
     ]
 
@@ -268,7 +276,7 @@ def run_census(
     config: Config,
     shape: str,
     rules: Iterable[Rule],
-    grids: Sequence[int],
+    grids: Sequence[int | str],
     seeds: Sequence[int],
     steps: int,
     density: float,

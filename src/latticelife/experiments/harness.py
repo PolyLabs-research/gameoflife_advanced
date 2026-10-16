@@ -2,9 +2,12 @@
 torus sessions built from a loaded config, JSONL output that resumes, and a worker pool that a
 Ctrl+C stops cleanly.
 
-Every experiment runs a single species on a wrapped `size x size` grid: the dynamics are then
-deterministic given the seed (`experiments.periodicity`), and the torus has a translation group
-(`core.translations`). Grid shape and size come from the experiment's own arguments, not from
+Every experiment runs a single species on a wrapped torus: the dynamics are then deterministic
+given the seed (`experiments.periodicity`), and the torus has a translation group
+(`core.translations`). A torus is named by its grid label: an int for a square `L x L` torus
+(`32`), or `"WxH"` for a rectangle (`"24x26"`), width first; `parse_grid` turns either written
+form into the one label, so `"32x32"` is `32` and records of square tori read as they always
+have. Grid shape and size come from the experiment's own arguments, not from
 `[grid]`; the config supplies `triangle_mode`, the alert and static-threshold settings a session
 needs, and the output root.
 
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import numbers
 import signal
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import replace
@@ -35,24 +39,73 @@ from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
 from latticelife.session.session import SimulationSession
 
+GridLabel = int | str
 
-def torus_config(config: Config, shape: str, size: int, density: float) -> Config:
-    """`config` set up for one species on a wrapped `size x size` grid of `shape`, seeded at
-    `density`, with per-generation cluster metrics off (the experiments compute clusters
-    themselves, once, where they need them)."""
+
+def parse_grid(grid: int | str | tuple[int, int]) -> GridLabel:
+    """The canonical label of a torus size: `32`, `"32"`, `"32x32"` and `(32, 32)` are `32`;
+    `"24x26"` and `(24, 26)` are `"24x26"`. ValueError for anything else, or a side below 1."""
+    width, height = grid_dimensions(grid)
+    return width if width == height else f"{width}x{height}"
+
+
+def grid_dimensions(grid: int | str | tuple[int, int]) -> tuple[int, int]:
+    """(width, height) of a torus named by a label (`32`, `"24x26"`) or a pair."""
+    if isinstance(grid, bool):
+        raise ValueError(f"not a torus size: {grid!r}")
+    if isinstance(grid, numbers.Integral):  # numpy integers too
+        width = height = int(grid)
+    elif isinstance(grid, tuple | list) and len(grid) == 2:
+        width, height = (int(v) for v in grid)
+    elif isinstance(grid, str):
+        text = grid.strip().lower()
+        try:
+            if "x" in text:
+                w, h = text.split("x")
+                width, height = int(w), int(h)
+            else:
+                width = height = int(text)
+        except ValueError:
+            raise ValueError(f"not a torus size: {grid!r} (expected L or WxH)") from None
+    else:
+        raise ValueError(f"not a torus size: {grid!r}")
+    if width < 1 or height < 1:
+        raise ValueError(f"torus sides must be at least 1 (got {width} x {height})")
+    return width, height
+
+
+def grid_sort_key(grid: int | str | tuple[int, int]) -> tuple[int, int, int]:
+    """Orders torus sizes by cell count, then width: square and rectangular labels mix."""
+    width, height = grid_dimensions(grid)
+    return width * height, width, height
+
+
+def torus_config(
+    config: Config, shape: str, size: int | str | tuple[int, int], density: float
+) -> Config:
+    """`config` set up for one species on a wrapped torus of `shape` and `size` (a grid label
+    or a (width, height) pair: `parse_grid`), seeded at `density`, with per-generation cluster
+    metrics off (the experiments compute clusters themselves, once, where they need them)."""
+    width, height = grid_dimensions(size)
     return replace(
         config,
-        grid=replace(config.grid, shape=shape, width=size, height=size, wrap=True),
+        grid=replace(config.grid, shape=shape, width=width, height=height, wrap=True),
         simulation=replace(config.simulation, initial_alive_percentage=density, n_lifeforms=1),
         metrics=replace(config.metrics, cluster_stride=2**31 - 1),
     )
 
 
 def single_species_session(
-    config: Config, rule: Rule, shape: str, size: int, density: float, seed: int
+    config: Config,
+    rule: Rule,
+    shape: str,
+    size: int | str | tuple[int, int],
+    density: float,
+    seed: int,
 ) -> SimulationSession:
-    """A fresh, unpaused session of `rule` alone on a `size x size` torus, reproducible from
-    `seed` (which must not be 0: a session seed of 0 means fresh entropy)."""
+    """A fresh, unpaused session of `rule` alone on a torus of `size` (`32`, `"24x26"`, or a
+    (width, height) pair), reproducible from `seed` (which must not be 0: a session seed of 0
+    means fresh entropy)."""
     if seed == 0:
         raise ValueError("seed 0 means fresh entropy to SimulationSession; use seeds from 1")
     session_config = torus_config(config, shape, size, density)

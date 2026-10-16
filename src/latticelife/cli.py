@@ -21,13 +21,15 @@ that never collapse).
 SIGINT (Ctrl+C), SIGTERM and SIGHUP all request a clean stop; the handler only records the
 request, and the polling loop then stops the worker, so no handler ever touches a lock.
 
-`census`, `sweep` and `soup` are the headless mathematics experiments (docs/experiments.md):
-each appends one JSON record per task to a JSONL file as the task finishes, skips the tasks that
-file already holds when started again, reports progress on stderr, and prints a JSON summary on
-stdout. Ctrl+C, SIGTERM and SIGHUP stop one with everything finished so far written (exit 130).
-Their arguments that depend on each other (a rule's counts against the lattice's degree, a torus
-size against the shape) are checked before anything runs, and a problem is one line on stderr
-with exit status 2, like a bad config.
+`census`, `sweep`, `soup` and `damage` are the headless mathematics experiments
+(docs/experiments.md): each appends one JSON record per task to a JSONL file as the task
+finishes, skips the tasks that file already holds when started again, reports progress on
+stderr, and prints a JSON summary on stdout. Ctrl+C, SIGTERM and SIGHUP stop one with
+everything finished so far written (exit 130). `--grid` takes `L` for a square torus or `WxH`
+for a rectangle. Their arguments that depend on each other (a rule's counts against the
+lattice's degree, a torus size against the shape) are checked before anything runs, and a
+problem is one line on stderr with exit status 2, like a bad config. `observe` reads such files
+and prints their observables (`experiments.observables`), one JSON row per line.
 """
 
 from __future__ import annotations
@@ -61,8 +63,8 @@ from latticelife.core.geometries import SHAPES, max_degree, validate_dimensions
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
 from latticelife.discovery.worker import EXIT_LOCKED, STOP_SIGNALS, DiscoveryWorker
-from latticelife.experiments import census, objects, sweeps
-from latticelife.experiments.harness import read_jsonl
+from latticelife.experiments import census, damage, objects, observables, sweeps
+from latticelife.experiments.harness import grid_dimensions, parse_grid, read_jsonl
 from latticelife.logging import configure_logging, log_event, log_path
 from latticelife.recording.recorder import Recorder, RecorderOpenError, RecorderSchemaError
 from latticelife.session.session import SimulationSession
@@ -110,6 +112,24 @@ def _unit_fraction(text: str) -> float:
     return value
 
 
+def _grid_size(text: str) -> int | str:
+    """A torus size: `L` for a square torus, `WxH` for a rectangle."""
+    try:
+        return parse_grid(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _non_negative_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number, got {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be at least 0 (got {value})")
+    return value
+
+
 def _even_positive_int(text: str) -> int:
     value = _positive_int(text)
     if value % 2:
@@ -119,6 +139,9 @@ def _even_positive_int(text: str) -> int:
 
 # How often the experiment commands report progress on stderr.
 _PROGRESS_EVERY = 100
+
+
+_GRID_HELP = "torus sizes: L for a square torus, WxH for a rectangle (default 32)"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -157,9 +180,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="'all' (every rule of the lattice), 'dual' (one per complement pair), "
         "'random:N' (N random rules, reproducible with simulation.seed), or B/S strings",
     )
-    census_parser.add_argument(
-        "--grid", type=_positive_int, nargs="+", default=[32], help="torus sizes (default 32)"
-    )
+    census_parser.add_argument("--grid", type=_grid_size, nargs="+", default=[32], help=_GRID_HELP)
     census_parser.add_argument("--steps", type=_positive_int, default=500)
     census_parser.add_argument("--seeds", type=_positive_int, default=1, help="soups per rule")
     census_parser.add_argument("--density", type=_unit_fraction, default=0.5)
@@ -173,9 +194,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sweep_parser.add_argument("--rule", required=True, help="a B/S string, e.g. B3/S23")
     sweep_parser.add_argument("--shape", choices=SHAPES, required=True)
-    sweep_parser.add_argument(
-        "--grid", type=_positive_int, nargs="+", default=[32], help="torus sizes (default 32)"
-    )
+    sweep_parser.add_argument("--grid", type=_grid_size, nargs="+", default=[32], help=_GRID_HELP)
     sweep_parser.add_argument(
         "--densities",
         nargs="+",
@@ -192,7 +211,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     soup_parser.add_argument("--rule", required=True, help="a B/S string, e.g. B3/S23")
     soup_parser.add_argument("--shape", choices=SHAPES, required=True)
-    soup_parser.add_argument("--grid", type=_positive_int, default=64, help="torus size")
+    soup_parser.add_argument(
+        "--grid", type=_grid_size, default=64, help="torus size: L, or WxH (default 64)"
+    )
     soup_parser.add_argument("--seeds", type=_positive_int, default=20, help="number of soups")
     soup_parser.add_argument("--steps", type=_positive_int, default=1000)
     soup_parser.add_argument("--density", type=_unit_fraction, default=0.3)
@@ -206,6 +227,41 @@ def _build_parser() -> argparse.ArgumentParser:
         "--margin", type=_even_positive_int, default=8, help="room round an object (even)"
     )
     _add_experiment_arguments(soup_parser)
+
+    damage_parser = subparsers.add_parser(
+        "damage", help="Damage spreading: how far one flipped cell's effect spreads."
+    )
+    damage_parser.add_argument("--rule", required=True, help="a B/S string, e.g. B3/S23")
+    damage_parser.add_argument("--shape", choices=SHAPES, required=True)
+    damage_parser.add_argument("--grid", type=_grid_size, nargs="+", default=[32], help=_GRID_HELP)
+    damage_parser.add_argument(
+        "--densities",
+        nargs="+",
+        default=["0.5"],
+        metavar="DENSITY",
+        help="initial densities: numbers, or LO:HI:STEP ranges (default 0.5)",
+    )
+    damage_parser.add_argument("--seeds", type=_positive_int, default=10, help="runs per point")
+    damage_parser.add_argument(
+        "--steps", type=_positive_int, default=200, help="generations after the flip"
+    )
+    damage_parser.add_argument("--flips", type=_positive_int, default=1, help="cells flipped")
+    damage_parser.add_argument(
+        "--warmup", type=_non_negative_int, default=0, help="generations run before the flip"
+    )
+    _add_experiment_arguments(damage_parser)
+
+    observe_parser = subparsers.add_parser(
+        "observe", help="Observables (numbers with intervals) from experiment JSONL files."
+    )
+    observe_parser.add_argument(
+        "quantity",
+        choices=("transient", "survival", "damage"),
+        help="transient: median settling time (census or sweep files); survival: share alive "
+        "(sweep); damage: final damage (damage)",
+    )
+    observe_parser.add_argument("files", nargs="+", type=Path, help="JSONL record files")
+    observe_parser.add_argument("--rule", default=None, help="only records of this B/S rule")
 
     return parser
 
@@ -501,10 +557,11 @@ def _census_rules(specs: list[str], shape: str, config: Config) -> list[Rule]:
     return [_parse_rule(spec, shape, config) for spec in specs]
 
 
-def _check_torus_sizes(shape: str, sizes: list[int], config: Config) -> None:
+def _check_torus_sizes(shape: str, sizes: list[int | str], config: Config) -> None:
     for size in sizes:
+        width, height = grid_dimensions(size)
         try:
-            validate_dimensions(shape, size, size, True, config.grid.triangle_mode)
+            validate_dimensions(shape, width, height, True, config.grid.triangle_mode)
         except ValueError as exc:
             raise ConfigError(f"--grid {size}: {exc}") from None
 
@@ -676,6 +733,76 @@ def run_soup(args: argparse.Namespace) -> int:
     return status
 
 
+def run_damage(args: argparse.Namespace) -> int:
+    config = _load_config(args.config)
+    rule = _parse_rule(args.rule, args.shape, config)
+    _check_torus_sizes(args.shape, args.grid, config)
+    densities = _parse_densities(args.densities)
+    n = max_degree(args.shape, config.grid.triangle_mode)
+    out = _default_out(args, f"damage-{args.shape}-{_rule_slug(rule, n)}.jsonl")
+    seeds = list(range(1, args.seeds + 1))
+    total = len(args.grid) * len(densities) * len(seeds)
+    summary: dict = {"out": str(out), "rule": rule.to_bs_string(n), "planned": total}
+    records = damage.run_damage(
+        config,
+        rule,
+        args.shape,
+        args.grid,
+        densities,
+        seeds,
+        args.steps,
+        out,
+        workers=args.workers,
+        flips=args.flips,
+        warmup=args.warmup,
+    )
+    status = _run_experiment("damage", records, total, summary)
+    summary["by_grid"] = damage.summarise(
+        r
+        for r in read_jsonl(out)
+        if r.get("rule") == summary["rule"]
+        and r.get("steps") == args.steps
+        and r.get("flips") == args.flips
+        and r.get("warmup") == args.warmup
+    )
+    print(json.dumps(summary))
+    return status
+
+
+def run_observe(args: argparse.Namespace) -> int:
+    records = []
+    for path in args.files:
+        if not path.is_file():
+            raise ConfigError(f"{path}: no such file")
+        records.extend(read_jsonl(path))
+    if args.rule is not None:
+        try:
+            wanted = Rule.from_bs_string(args.rule)
+        except ValueError as exc:
+            raise ConfigError(f"--rule: {exc}") from None
+        wanted_sets = (wanted.birth, wanted.survive)
+        kept = []
+        for record in records:
+            rule = Rule.from_bs_string(record["rule"])
+            if (rule.birth, rule.survive) == wanted_sets:
+                kept.append(record)
+        records = kept
+    try:
+        if args.quantity == "transient":
+            rows = observables.median_transient(records)
+        elif args.quantity == "survival":
+            rows = observables.survival(records)
+        else:
+            rows = observables.damage_spread(records)
+    except KeyError as exc:
+        raise ConfigError(f"records lack the field {exc} that {args.quantity} needs") from None
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
+    for row in rows:
+        print(json.dumps(row.to_json()))
+    return EXIT_OK
+
+
 def run_ui(args: argparse.Namespace) -> None:
     """Launches the interactive pygame app. Imported lazily so `autorun`/`discover` never pull
     in pygame on their path (§6.13's headless commands must never import pygame)."""
@@ -702,6 +829,10 @@ def main(argv: list[str] | None = None) -> int:
             return run_sweep(args)
         if args.command == "soup":
             return run_soup(args)
+        if args.command == "damage":
+            return run_damage(args)
+        if args.command == "observe":
+            return run_observe(args)
         run_ui(args)
         return EXIT_OK
     except (ConfigError, RecorderSchemaError, RecorderOpenError) as exc:

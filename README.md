@@ -70,10 +70,15 @@ uv run python -m latticelife.cli discover --minutes 30                 # (mu+lam
 uv run python -m latticelife.cli census --shape hexagon --rules dual   # every rule's exact fate
 uv run python -m latticelife.cli sweep --shape hexagon --rule B2/S34 --grid 16 32 64
 uv run python -m latticelife.cli soup --shape hexagon --rule B2/S34    # objects soups leave
+uv run python -m latticelife.cli damage --shape hexagon --rule B2/S34  # damage spreading
+uv run python -m latticelife.cli observe transient out/sweep-hexagon-B2S34.jsonl
 ```
 
-`census`, `sweep` and `soup` are the mathematics experiments: exact periods, phase diagrams and
-object catalogues per lattice, written as JSONL and resumable. See `docs/experiments.md`.
+`census`, `sweep`, `soup` and `damage` are the mathematics experiments: exact periods, phase
+diagrams, object catalogues and damage spreading per lattice, on square or rectangular tori
+(`--grid 24x26`), written as JSONL and resumable. `observe` turns their records into numbers with
+intervals and says when a number is only a bound. See `docs/experiments.md`; the interface other
+projects use is kept stable and changes are noted in `docs/CHANGELOG.md`.
 
 3D torus rendering (the `V` key in `ui`) needs the optional extra: `uv sync --extra torus`.
 

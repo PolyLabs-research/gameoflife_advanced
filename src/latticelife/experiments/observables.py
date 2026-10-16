@@ -1,0 +1,503 @@
+"""Observables: what the experiments' records say, as numbers with uncertainty and stated limits.
+Each function takes run records (the dicts the JSONL files hold, or the record dataclasses) and
+returns one row per setting. A row says how many runs it rests on, gives an interval, and says
+plainly when its number is only a bound, because only the simulator knows that: a run with no
+repeated state within its cap does not have a long transient, it has a long transient *or* a long
+period, and a law about settling time judged on such a run would be judged on a guess.
+
+`median_transient`: per torus size (and density), the median settling time over seeds with a
+bootstrap 95% interval. A seed's settling time is its exact transient: the generation its final
+cycle begins (for a soup that dies on a rule without birth from nothing, the generation it
+died). Records of the same seed at different caps (`steps`) are merged, since a run is
+deterministic given its seed: a seed counts as settled if any of its runs settled, and is
+otherwise unsettled up to the largest cap tried (`no_repeat_before`). A row with an unsettled
+seed is not `complete`: its `median` is None, `median_at_least`/`median_at_most` bound what the
+median could be, and `unsettled_seeds` names the seeds to rerun with a larger cap.
+
+`survival`: per size, density and step count, the share of soups alive at generation
+`steps - 1`, with a Wilson score interval. Every sweep run's fate is exact, so nothing here is
+censored.
+
+`density_series`: mean density over time, averaged over single-species sessions with the same
+rule, lattice and torus, read from an `autorun` database (schema v2).
+
+`damage_spread`: per size and density, the mean final fraction of damaged cells over seeds, with
+a bootstrap interval, and the share of runs that healed.
+
+The bootstrap is seeded (`bootstrap_seed`), so the same records always give the same rows.
+Rows are frozen dataclasses with `to_json()`; `size` is the square root of the cell count, the
+side of a square torus with as many cells, so square and rectangular tori share one axis.
+"""
+
+from __future__ import annotations
+
+import math
+import sqlite3
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from latticelife.core.geometries import max_degree
+from latticelife.core.rules import Rule, parse_counts
+from latticelife.experiments.harness import GridLabel, grid_dimensions, grid_sort_key, parse_grid
+
+CONFIDENCE = 0.95
+Z95 = 1.959963984540054  # standard normal quantile for a 95% two-sided interval
+BOOTSTRAP_RESAMPLES = 2000
+
+
+def _as_dict(record: Any) -> dict:
+    return record if isinstance(record, dict) else record.to_json()
+
+
+def _geometry(grid: GridLabel) -> dict:
+    width, height = grid_dimensions(grid)
+    cells = width * height
+    return {"width": width, "height": height, "cells": cells, "size": math.sqrt(cells)}
+
+
+def settling_time(record: dict) -> int | None:
+    """The exact settling time of one census or sweep record, or None when it did not settle
+    within its cap. A soup that died on a rule with 0 not in B was absorbed at its extinction
+    step (the sweep stops there, so it records no period)."""
+    record = _as_dict(record)
+    if record.get("transient") is not None:
+        return int(record["transient"])
+    extinct = record.get("extinction_step")
+    if extinct is not None and 0 not in Rule.from_bs_string(record["rule"]).birth:
+        return int(extinct)
+    return None
+
+
+def no_repeat_before(record: dict) -> int | None:
+    """For a record that did not settle, the last generation it reached with no state repeated
+    (so transient + period exceeds it); None for a settled record. Records written before the
+    field existed are read from `stopped_at` (sweep) or `steps - 1` (census)."""
+    record = _as_dict(record)
+    if settling_time(record) is not None:
+        return None
+    if record.get("no_repeat_before") is not None:
+        return int(record["no_repeat_before"])
+    if record.get("stopped_at") is not None:
+        return int(record["stopped_at"])
+    return int(record["steps"]) - 1
+
+
+def bootstrap_interval(
+    values: Sequence[float],
+    statistic=np.median,
+    confidence: float = CONFIDENCE,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = 0,
+) -> tuple[float, float]:
+    """Percentile bootstrap interval of `statistic` over `values`, from a seeded generator.
+    One value gives a zero-width interval at that value."""
+    data = np.asarray(values, dtype=float)
+    if data.size == 0:
+        raise ValueError("no values to bootstrap")
+    if data.size == 1:
+        return float(data[0]), float(data[0])
+    rng = np.random.default_rng(seed)
+    draws = rng.integers(0, data.size, size=(resamples, data.size))
+    stats = statistic(data[draws], axis=1)
+    tail = (1.0 - confidence) / 2.0 * 100.0
+    low, high = np.percentile(stats, [tail, 100.0 - tail])
+    return float(low), float(high)
+
+
+def wilson_interval(successes: int, trials: int, z: float = Z95) -> tuple[float, float]:
+    """Wilson score interval for a binomial proportion (sound at 0 and 1, unlike p +- z se)."""
+    if trials < 1:
+        raise ValueError("no trials")
+    p = successes / trials
+    denominator = 1.0 + z * z / trials
+    centre = (p + z * z / (2 * trials)) / denominator
+    half = z * math.sqrt(p * (1 - p) / trials + z * z / (4 * trials * trials)) / denominator
+    # At p = 0 or 1 the interval ends exactly at 0 or 1; say so rather than leave rounding.
+    low = 0.0 if successes == 0 else max(0.0, centre - half)
+    high = 1.0 if successes == trials else min(1.0, centre + half)
+    return low, high
+
+
+# --- settling time --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TransientRow:
+    rule: str
+    shape: str
+    triangle_mode: str | None
+    grid: GridLabel
+    width: int
+    height: int
+    cells: int
+    size: float  # sqrt(cells)
+    density: float
+    seeds: int  # distinct seeds
+    settled: int  # seeds with an exact settling time
+    unsettled: int  # seeds that never repeated within any cap tried
+    complete: bool  # every seed settled: `median` is a measurement, not a bound
+    median: float | None  # median settling time over all seeds, when complete
+    low: float | None  # bootstrap 95% interval of that median
+    high: float | None
+    median_at_least: float | None  # what the median over all seeds could be, from the settled
+    median_at_most: float | None  # seeds alone (None: unbounded)
+    settled_median: float | None  # median over the settled seeds only, for information
+    max_cap: int | None  # the largest no_repeat_before among unsettled seeds
+    unsettled_seeds: list[int] = field(default_factory=list)
+    settling_times: list[int] = field(default_factory=list)  # settled seeds' times, by seed
+
+    def to_json(self) -> dict:
+        return asdict(self)
+
+
+def _bounded_median(known: list[int], unknown: int) -> tuple[float, float | None]:
+    """The median of `known` plus `unknown` values that could be anything from 0 up: lowest
+    with them all 0, highest with them all unbounded (None when that leaves it unbounded)."""
+    low = float(np.median(sorted(known) + [0] * unknown)) if known or unknown else math.nan
+    total = len(known) + unknown
+    ordered = sorted(known)
+    if total % 2:
+        idx = total // 2
+        high = float(ordered[idx]) if idx < len(ordered) else None
+    else:
+        idx = total // 2
+        high = float((ordered[idx - 1] + ordered[idx]) / 2) if idx < len(ordered) else None
+    return low, high
+
+
+def median_transient(
+    records: Iterable[dict],
+    bootstrap_seed: int = 0,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+) -> list[TransientRow]:
+    """Per (rule, shape, triangle mode, torus, density): the median settling time over seeds,
+    with a bootstrap 95% interval, from census or sweep records (see the module docstring).
+    Raises ValueError if two settled records of one seed disagree: the runs are deterministic,
+    so that is a bug or a mixed-up file, never noise."""
+    groups: dict[tuple, dict[int, dict]] = {}
+    for record in records:
+        data = _as_dict(record)
+        key = (
+            data["rule"],
+            data["shape"],
+            data.get("triangle_mode"),
+            parse_grid(data["grid"]),
+            float(data["density"]),
+        )
+        seeds = groups.setdefault(key, {})
+        seed = int(data["seed"])
+        time = settling_time(data)
+        state = seeds.setdefault(seed, {"time": None, "cap": None})
+        if time is not None:
+            if state["time"] is not None and state["time"] != time:
+                raise ValueError(
+                    f"seed {seed} of {key} settled at {state['time']} in one record and {time} "
+                    "in another; deterministic runs must agree"
+                )
+            state["time"] = time
+        else:
+            cap = no_repeat_before(data)
+            state["cap"] = cap if state["cap"] is None else max(state["cap"], cap)
+
+    rows = []
+    for key in sorted(groups, key=lambda k: (k[0], k[1], str(k[2]), grid_sort_key(k[3]), k[4])):
+        rule, shape, triangle_mode, grid, density = key
+        seeds = groups[key]
+        known = {s: v["time"] for s, v in sorted(seeds.items()) if v["time"] is not None}
+        open_seeds = sorted(s for s, v in seeds.items() if v["time"] is None)
+        times = list(known.values())
+        complete = not open_seeds
+        median = low = high = None
+        if complete:
+            median = float(np.median(times))
+            low, high = bootstrap_interval(times, seed=bootstrap_seed, resamples=resamples)
+        at_least, at_most = _bounded_median(times, len(open_seeds))
+        caps = [seeds[s]["cap"] for s in open_seeds]
+        rows.append(
+            TransientRow(
+                rule=rule,
+                shape=shape,
+                triangle_mode=triangle_mode,
+                grid=grid,
+                **_geometry(grid),
+                density=density,
+                seeds=len(seeds),
+                settled=len(times),
+                unsettled=len(open_seeds),
+                complete=complete,
+                median=median,
+                low=low,
+                high=high,
+                median_at_least=at_least,
+                median_at_most=at_most,
+                settled_median=float(np.median(times)) if times else None,
+                max_cap=max(caps) if caps else None,
+                unsettled_seeds=open_seeds,
+                settling_times=times,
+            )
+        )
+    return rows
+
+
+# --- survival -------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SurvivalRow:
+    rule: str
+    shape: str
+    triangle_mode: str | None
+    grid: GridLabel
+    width: int
+    height: int
+    cells: int
+    size: float
+    density: float
+    steps: int
+    runs: int
+    survived: int
+    p: float  # share of soups alive at generation steps - 1
+    low: float  # Wilson 95% interval
+    high: float
+
+    def to_json(self) -> dict:
+        return asdict(self)
+
+
+def survival(records: Iterable[dict]) -> list[SurvivalRow]:
+    """Per (rule, shape, triangle mode, torus, density, steps): the share of sweep runs alive at
+    generation `steps - 1`, with a Wilson 95% interval. A seed recorded twice counts once (and
+    must agree)."""
+    groups: dict[tuple, dict[int, bool]] = {}
+    for record in records:
+        data = _as_dict(record)
+        key = (
+            data["rule"],
+            data["shape"],
+            data.get("triangle_mode"),
+            parse_grid(data["grid"]),
+            float(data["density"]),
+            int(data["steps"]),
+        )
+        seeds = groups.setdefault(key, {})
+        seed, alive = int(data["seed"]), bool(data["survived"])
+        if seeds.get(seed, alive) != alive:
+            raise ValueError(f"seed {seed} of {key} both survived and died; runs must agree")
+        seeds[seed] = alive
+    rows = []
+    for key in sorted(
+        groups, key=lambda k: (k[0], k[1], str(k[2]), grid_sort_key(k[3]), k[5], k[4])
+    ):
+        rule, shape, triangle_mode, grid, density, steps = key
+        outcomes = groups[key]
+        runs, alive = len(outcomes), sum(outcomes.values())
+        low, high = wilson_interval(alive, runs)
+        rows.append(
+            SurvivalRow(
+                rule=rule,
+                shape=shape,
+                triangle_mode=triangle_mode,
+                grid=grid,
+                **_geometry(grid),
+                density=density,
+                steps=steps,
+                runs=runs,
+                survived=alive,
+                p=alive / runs,
+                low=low,
+                high=high,
+            )
+        )
+    return rows
+
+
+# --- density over time ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DensityRow:
+    rule: str
+    shape: str
+    triangle_mode: str | None
+    width: int
+    height: int
+    generation: int
+    mean: float  # mean density over the sessions at this generation
+    sem: float  # its standard error (0 for a single session)
+    sessions: int
+    initial_density_min: float  # the sessions' seeded densities span this range
+    initial_density_max: float
+
+    def to_json(self) -> dict:
+        return asdict(self)
+
+
+def density_series(
+    db_path: str | Path,
+    rule: str | None = None,
+    shape: str | None = None,
+    grid: int | str | None = None,
+    max_generation: int | None = None,
+) -> list[DensityRow]:
+    """Mean density per generation over the single-species sessions of an `autorun` database,
+    grouped by rule, shape, triangle mode and torus (optionally only those matching `rule`,
+    `shape` and `grid`). Multi-species sessions are left out: their births are random. The
+    database is opened read-only."""
+    uri = f"file:{Path(db_path)}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        sessions = conn.execute(
+            """SELECT s.session_id, s.shape, s.triangle_mode, s.grid_width, s.grid_height,
+                      s.initial_alive_percentage, l.birth, l.survive
+               FROM session_metadata s JOIN lifeform_meta l ON l.session_id = s.session_id
+               WHERE s.n_lifeforms = 1"""
+        ).fetchall()
+        want_dims = grid_dimensions(grid) if grid is not None else None
+        want_rule = Rule.from_bs_string(rule) if rule is not None else None
+        groups: dict[tuple, list[tuple[str, float]]] = {}
+        for sid, sh, tm, w, h, rho0, birth, survive in sessions:
+            if shape is not None and sh != shape:
+                continue
+            if want_dims is not None and (w, h) != want_dims:
+                continue
+            parsed = Rule(birth=parse_counts(birth), survive=parse_counts(survive))
+            if want_rule is not None and (parsed.birth, parsed.survive) != (
+                want_rule.birth,
+                want_rule.survive,
+            ):
+                continue
+            text = parsed.to_bs_string(max_degree(sh, tm or "edge+vertex"))
+            mode = tm if sh == "triangle" else None
+            groups.setdefault((text, sh, mode, w, h), []).append((sid, float(rho0)))
+
+        rows: list[DensityRow] = []
+        for (text, sh, mode, w, h), members in sorted(groups.items(), key=lambda g: str(g[0])):
+            cells = w * h
+            series: dict[int, list[float]] = {}
+            for sid, _ in members:
+                query = (
+                    "SELECT generation, total_alive FROM generation_metrics WHERE session_id = ?"
+                )
+                params: list = [sid]
+                if max_generation is not None:
+                    query += " AND generation <= ?"
+                    params.append(max_generation)
+                for generation, alive in conn.execute(query, params):
+                    series.setdefault(int(generation), []).append(alive / cells)
+            seeded = [rho0 for _, rho0 in members]
+            for generation in sorted(series):
+                values = np.asarray(series[generation])
+                sem = float(values.std(ddof=1) / math.sqrt(len(values))) if len(values) > 1 else 0.0
+                rows.append(
+                    DensityRow(
+                        rule=text,
+                        shape=sh,
+                        triangle_mode=mode,
+                        width=w,
+                        height=h,
+                        generation=generation,
+                        mean=float(values.mean()),
+                        sem=sem,
+                        sessions=len(values),
+                        initial_density_min=min(seeded),
+                        initial_density_max=max(seeded),
+                    )
+                )
+        return rows
+    finally:
+        conn.close()
+
+
+# --- damage spreading -----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DamageRow:
+    rule: str
+    shape: str
+    triangle_mode: str | None
+    grid: GridLabel
+    width: int
+    height: int
+    cells: int
+    size: float
+    density: float
+    steps: int
+    flips: int
+    warmup: int
+    runs: int
+    healed: int  # runs whose twins agreed again
+    mean_final: float  # mean fraction of cells differing at the last generation
+    low: float  # bootstrap 95% interval of that mean
+    high: float
+
+    def to_json(self) -> dict:
+        return asdict(self)
+
+
+def damage_spread(
+    records: Iterable[dict], bootstrap_seed: int = 0, resamples: int = BOOTSTRAP_RESAMPLES
+) -> list[DamageRow]:
+    """Per (rule, shape, triangle mode, torus, density, steps, flips, warmup): the mean final
+    damage over seeds with a bootstrap 95% interval, and how many runs healed."""
+    groups: dict[tuple, dict[int, dict]] = {}
+    for record in records:
+        data = _as_dict(record)
+        key = (
+            data["rule"],
+            data["shape"],
+            data.get("triangle_mode"),
+            parse_grid(data["grid"]),
+            float(data["density"]),
+            int(data["steps"]),
+            int(data["flips"]),
+            int(data["warmup"]),
+        )
+        groups.setdefault(key, {})[int(data["seed"])] = data
+    rows = []
+    for key in sorted(groups, key=lambda k: (k[0], k[1], str(k[2]), grid_sort_key(k[3]), k[4:])):
+        rule, shape, triangle_mode, grid, density, steps, flips, warmup = key
+        runs = list(groups[key].values())
+        finals = [float(r["final"]) for r in runs]
+        low, high = bootstrap_interval(finals, np.mean, seed=bootstrap_seed, resamples=resamples)
+        rows.append(
+            DamageRow(
+                rule=rule,
+                shape=shape,
+                triangle_mode=triangle_mode,
+                grid=grid,
+                **_geometry(grid),
+                density=density,
+                steps=steps,
+                flips=flips,
+                warmup=warmup,
+                runs=len(runs),
+                healed=sum(r["healed_at"] is not None for r in runs),
+                mean_final=float(np.mean(finals)),
+                low=low,
+                high=high,
+            )
+        )
+    return rows
+
+
+__all__ = [
+    "BOOTSTRAP_RESAMPLES",
+    "CONFIDENCE",
+    "DamageRow",
+    "DensityRow",
+    "SurvivalRow",
+    "TransientRow",
+    "bootstrap_interval",
+    "damage_spread",
+    "density_series",
+    "median_transient",
+    "no_repeat_before",
+    "settling_time",
+    "survival",
+    "wilson_interval",
+]

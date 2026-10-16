@@ -40,8 +40,11 @@ from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
 from latticelife.core.translations import PatternKey, TorusTranslations, key_extent
 from latticelife.experiments.harness import (
+    GridLabel,
     append_jsonl,
+    grid_dimensions,
     map_tasks,
+    parse_grid,
     resume_keys,
     single_species_session,
 )
@@ -208,7 +211,7 @@ class SoupTask:
     config: Config
     rule: str
     shape: str
-    grid: int
+    grid: GridLabel
     seed: int
     steps: int
     density: float
@@ -239,7 +242,8 @@ def soup_objects(task: SoupTask) -> dict:
         if repeat is not None:
             period, transient = repeat
             break
-    translations = TorusTranslations(task.shape, task.grid, task.grid, triangle_mode)
+    width, height = grid_dimensions(task.grid)
+    translations = TorusTranslations(task.shape, width, height, triangle_mode)
     objects: list[dict] = []
     unidentified = dict.fromkeys(UNIDENTIFIED, 0)
     cache: dict[PatternKey, ObjectRecord | str] = {}
@@ -261,7 +265,7 @@ def soup_objects(task: SoupTask) -> dict:
         "rule": rule.to_bs_string(n),
         "shape": task.shape,
         "triangle_mode": triangle_mode if task.shape == "triangle" else None,
-        "grid": task.grid,
+        "grid": parse_grid(task.grid),
         "seed": task.seed,
         "steps": task.steps,
         "density": task.density,
@@ -270,6 +274,7 @@ def soup_objects(task: SoupTask) -> dict:
         "stopped_at": stopped_at,
         "objects": objects,
         "unidentified": unidentified,
+        "no_repeat_before": stopped_at if period is None else None,
     }
 
 
@@ -277,7 +282,7 @@ def run_soups(
     config: Config,
     rule: Rule,
     shape: str,
-    grid: int,
+    grid: int | str,
     seeds: Sequence[int],
     steps: int,
     density: float,
@@ -292,6 +297,7 @@ def run_soups(
     rule_text = rule.to_bs_string(n)
     triangle_mode = config.grid.triangle_mode if shape == "triangle" else None
     done = resume_keys(out_path, RECORD_KEY)
+    grid = parse_grid(grid)
     tasks = [
         SoupTask(config, rule_text, shape, grid, seed, steps, density, radius, max_period, margin)
         for seed in seeds

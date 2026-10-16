@@ -915,3 +915,82 @@ def test_sigterm_stops_an_experiment_with_its_records_kept(tmp_path, log_dir):
     assert summary["records"] == 1
     assert summary["skipped"] is None
     assert len(_records(out)) == 1
+
+
+# --- rectangular tori, damage, observe ---------------------------------------------------------
+
+
+def test_sweep_takes_rectangular_tori(tmp_path, log_dir, capsys):
+    config = write_config(tmp_path)
+    out = tmp_path / "sweep.jsonl"
+    argv = ["sweep", "--rule", "B2/S34", "--shape", "hexagon", "--grid", "8", "8x10", "10x8"]
+    argv += ["--densities", "0.5", "--seeds", "2", "--steps", "40"]
+    argv += ["--config", str(config), "--out", str(out)]
+    assert cli.main(argv) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert set(summary["critical_densities"]) == {"8", "8x10", "10x8"}
+    records = _records(out)
+    assert sorted({str(r["grid"]) for r in records}) == ["10x8", "8", "8x10"]
+    assert all("no_repeat_before" in r for r in records)
+
+
+@pytest.mark.parametrize("grid", ["8x", "axb", "0x4"])
+def test_a_malformed_grid_is_a_usage_error(tmp_path, log_dir, capsys, grid):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["sweep", "--rule", "B3/S23", "--shape", "square", "--grid", grid])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "argument --grid" in err and ("torus size" in err or "at least 1" in err)
+
+
+def test_a_rectangle_the_shape_cannot_wrap_exits_2(tmp_path, log_dir, capsys):
+    config = write_config(tmp_path)
+    argv = ["sweep", "--rule", "B2/S34", "--shape", "hexagon", "--grid", "7x8"]
+    assert cli.main([*argv, "--config", str(config), "--out", str(tmp_path / "x.jsonl")]) == 2
+    assert "even width" in capsys.readouterr().err
+
+
+def test_damage_records_and_resumes(tmp_path, log_dir, capsys):
+    config = write_config(tmp_path)
+    out = tmp_path / "damage.jsonl"
+    argv = ["damage", "--rule", "B2/S34", "--shape", "hexagon", "--grid", "8", "--seeds", "3"]
+    argv += ["--steps", "30", "--warmup", "5", "--config", str(config), "--out", str(out)]
+    assert cli.main(argv) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert (summary["planned"], summary["records"]) == (3, 3)
+    assert summary["by_grid"]["8"]["runs"] == 3
+    records = _records(out)
+    assert {(r["steps"], r["warmup"], r["flips"]) for r in records} == {(30, 5, 1)}
+    assert all(len(r["differing"]) == 30 for r in records)
+    assert cli.main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["records"] == 0
+
+
+def test_observe_prints_one_row_per_setting(tmp_path, log_dir, capsys):
+    config = write_config(tmp_path)
+    out = tmp_path / "sweep.jsonl"
+    argv = ["sweep", "--rule", "B2/S34", "--shape", "hexagon", "--grid", "8", "10"]
+    argv += ["--densities", "0.3", "0.6", "--seeds", "3", "--steps", "2000"]
+    assert cli.main([*argv, "--config", str(config), "--out", str(out)]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["observe", "transient", str(out)]) == 0
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [(r["grid"], r["density"]) for r in rows] == [(8, 0.3), (8, 0.6), (10, 0.3), (10, 0.6)]
+    assert all(r["seeds"] == 3 for r in rows)
+
+    assert cli.main(["observe", "survival", str(out), "--rule", "B2/S34"]) == 0
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(rows) == 4 and all(0 <= r["low"] <= r["p"] <= r["high"] <= 1 for r in rows)
+
+    assert cli.main(["observe", "survival", str(out), "--rule", "B3/S23"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_observe_reports_a_missing_file_or_field_in_one_line(tmp_path, log_dir, capsys):
+    assert cli.main(["observe", "transient", str(tmp_path / "missing.jsonl")]) == 2
+    assert "no such file" in capsys.readouterr().err
+    wrong = tmp_path / "wrong.jsonl"
+    wrong.write_text(json.dumps({"rule": "B3/S23"}) + "\n")
+    assert cli.main(["observe", "damage", str(wrong)]) == 2
+    assert capsys.readouterr().err.count("\n") == 1
