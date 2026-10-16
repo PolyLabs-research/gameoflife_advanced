@@ -269,7 +269,7 @@ def test_text_entry_is_on_only_while_a_field_has_focus(make_app, ui, text_entry)
     panel = app.settings_panel
     assert not text_entry.on
 
-    birth, survive = panel.rule_inputs[5]
+    birth, survive = panel.rule_inputs[1]
     u.click(birth.rect.center)
     assert text_entry.on and text_entry.rects[-1] == birth.rect
     u.click(survive.rect.center)  # one click blurs a field and focuses the next

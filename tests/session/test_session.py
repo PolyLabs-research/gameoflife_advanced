@@ -680,3 +680,23 @@ def test_run_memory_does_not_grow_with_the_number_of_generations():
         tracemalloc.stop()
 
     assert peak < 512 * 1024
+
+
+def test_clear_empties_the_grid_as_an_edit_not_a_collapse():
+    """Clearing to draw by hand keeps the generation and history and is never reported as a
+    sudden death."""
+    config = _config(width=20, height=20, wrap=True, initial_alive_percentage=0.5, seed=7)
+    session = SimulationSession(config, [Lifeform(1, CONWAY)])
+    session.run(15)
+    history = list(session.history_alive)
+    session.clear()
+    assert not session.grid.occupancy.any() and not session.grid.lifespans.any()
+    assert session.generation == 15 and list(session.history_alive) == history
+    for r, c in [(5, 5), (5, 6), (5, 7)]:  # a blinker
+        session.set_cell(r * 20 + c, 1)
+    session.run(20)
+    recent = [record for record in session.history_records if record.generation > 15]
+    assert all(
+        record.alert is None or record.alert.kind is not AlertKind.SUDDEN_DEATH for record in recent
+    )
+    assert int(np.count_nonzero(session.grid.occupancy)) == 3

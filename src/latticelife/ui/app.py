@@ -15,14 +15,21 @@ Editing (2D). A grid click is mapped to a cell by the same `render.GridLayout` t
 applied through `SimulationSession.set_cell`, so growth baselines and the sudden-death window
 see the edit. The click places the chosen species — number keys 1-9 and 0 (species 10), or a
 click on a species' colour in the settings panel, choose it — and clears a cell that already
-holds it. An edit made while running holds the simulation for `EDIT_HOLD_SECONDS`, so the edit is
-seen before the rule acts on it (legacy click parity).
+holds it. Dragging on from there paints every cell the pointer crosses the same way: with the
+species, or, for a drag that started by clearing a cell, empty. An edit made while running holds
+the simulation for `EDIT_HOLD_SECONDS`, and a drag holds it until the button is released, so the
+edit is seen before the rule acts on it (legacy click parity). Clear (C, or the panel's button)
+empties the grid and pauses, to draw from scratch.
 
 New (N) gives every current species a fresh random rule sized to the shape's neighbour count and
 re-seeds the grid; Reset (R) keeps the rules and re-seeds. Reset, New and Apply keep a pause the
 user chose, so generation 0 can be inspected and single-stepped, and lift one a sudden-death
-alert imposed. The help overlay ('?', or F1 on any keyboard layout) is modal: while it is open,
-input does nothing else, and a click closes it.
+alert imposed. An example from the panel (`ui/presets.py`) applies its shape and rule as one
+species on a wrapped grid, places its pattern in the middle of a clear grid and pauses. The help
+overlay ('?', F1 on any keyboard layout, or the panel's Shortcuts button) is modal: while it is
+open, input does nothing else, and a click closes it. The panel's live controls mirror the keys
+(V, C, '?') and add what has no key: whether an alert pauses the run, torus auto-rotation and a
+camera reset.
 
 Keyboard. SDL text entry is on only while a settings field has focus (`_sync_text_entry`): the
 field then gets typed text, input-method compositions and the on-screen keyboard, and keys repeat.
@@ -46,6 +53,7 @@ presented exactly as SDL chooses on every video driver.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -62,6 +70,7 @@ from latticelife.session.alerts import Alert, AlertKind
 from latticelife.session.session import SimulationSession
 from latticelife.ui import render
 from latticelife.ui.panel import SettingsPanel, ui_rng
+from latticelife.ui.presets import Example, example_size, place_cells
 from latticelife.ui.widgets import Button, blit_clipped
 
 if TYPE_CHECKING:  # never imported at run time: the [torus] extra is optional
@@ -108,7 +117,8 @@ SHORTCUTS = [
     ("R", "Reset: same rules, new random grid"),
     ("N", "New: random rules for every species"),
     ("S", "Step forward (when paused)"),
-    ("Click", "Place / remove the chosen species (2D)"),
+    ("C", "Clear the grid and pause, to draw"),
+    ("Click, drag", "Paint / erase the chosen species (2D)"),
     ("1-9, 0", "Choose the species clicks place"),
     ("V", "Toggle 2D / 3D torus view"),
     ("Drag, wheel", "Rotate / zoom the torus (3D)"),
@@ -371,6 +381,9 @@ class App:
         self.fonts = FontManager()
 
         self.hints_visible = False
+        # Whether a sudden-death alert pauses the run, and whether the torus turns by itself.
+        self.alert_pause = True
+        self.auto_rotate = True
         self.view_mode = "2D"
         # The 3D view (a `ui.torus.view.TorusView`) while view_mode is "3D", else None, and the
         # status message about it with the seconds it has left on screen.
@@ -389,6 +402,10 @@ class App:
         self.geometric_renderer = render.GeometricRenderer(BACKGROUND_COLOR)
         # The species id a grid click places.
         self.selected_species = 1
+        # During a drag on the grid: what it paints (a species id, or 0 to erase) and the last
+        # pointer position it painted to; None when no drag is under way.
+        self._stroke: int | None = None
+        self._stroke_pos: tuple[int, int] = (0, 0)
 
         # Simulation time owed (s), the last frame's length (s), and the edit hold left (s).
         self._sim_time = 0.0
@@ -406,6 +423,13 @@ class App:
             on_fps_change=self._set_fps,
             on_select_species=self._select_species,
             rng=self.ui_rng,
+            on_alert_pause_toggle=self._toggle_alert_pause,
+            on_view_toggle=self._toggle_view_mode,
+            on_auto_rotate_toggle=self._toggle_auto_rotate,
+            on_reset_camera=self._reset_camera,
+            on_help=self._show_help,
+            on_clear=self._clear_grid,
+            on_example=self._load_example,
         )
         self._sync_panel_species()
 
@@ -427,6 +451,7 @@ class App:
         self._sim_time = 0.0
         self._frame_seconds = 0.0  # this frame owes no time to the new session
         self._edit_hold = 0.0
+        self._stroke = None  # a drag never carries over into another grid
         self.geometric_renderer.reset()
         self._set_torus_status(None)  # the user has moved on
 
@@ -439,16 +464,23 @@ class App:
             self.session.step()
 
     def _replace_session(
-        self, config: Config, lifeforms: list[Lifeform], seed: int | None = None
+        self,
+        config: Config,
+        lifeforms: list[Lifeform],
+        seed: int | None = None,
+        paused: bool | None = None,
     ) -> None:
         # The run state carries over as in `SimulationSession.reset()` (F48): a pause the user
         # chose is kept, so the new generation 0 can be inspected and single-stepped; one a
         # sudden-death alert imposed belonged to the old run and is lifted.
-        old = self.session
-        paused = old.paused and not old.paused_by_alert
+        if paused is None:
+            old = self.session
+            paused = old.paused and not old.paused_by_alert
         self.config = config
         self.lifeforms = lifeforms
-        self.session = SimulationSession(config, lifeforms, seed=seed, paused=paused)
+        self.session = SimulationSession(
+            config, lifeforms, seed=seed, auto_pause=self.alert_pause, paused=paused
+        )
         self.palette = render.build_palette(lifeforms)
         if not 1 <= self.selected_species <= len(lifeforms):
             self.selected_species = 1
@@ -471,7 +503,59 @@ class App:
         self.settings_panel.set_lifeforms(lifeforms)
 
     def _apply_settings(self, new_config: Config, lifeforms: list[Lifeform]) -> None:
+        if new_config.simulation.seed != self.config.simulation.seed:
+            # A new seed makes New and the R buttons reproducible from it too.
+            self.ui_rng = ui_rng(new_config.simulation.seed)
+            self.settings_panel.rng = self.ui_rng
         self._replace_session(new_config, lifeforms)
+
+    def _load_example(self, example: Example) -> None:
+        """The example's shape and rule as one species on a wrapped grid (the current size when
+        it holds the example), its pattern in the middle of an otherwise clear grid, paused."""
+        grid = self.config.grid
+        width, height = example_size(example, grid.width, grid.height, True, grid.triangle_mode)
+        config = replace(
+            self.config,
+            grid=replace(grid, shape=example.shape, width=width, height=height, wrap=True),
+            simulation=replace(self.config.simulation, n_lifeforms=1),
+        )
+        lifeforms = [Lifeform(1, example.as_rule())]
+        self.selected_species = 1
+        self._replace_session(config, lifeforms, paused=True)
+        self.session.clear()
+        for index in place_cells(example.cells, example.shape, width, height):
+            self.session.set_cell(index, 1)
+        self.settings_panel.show_settings(config, lifeforms)
+
+    def _clear_grid(self) -> None:
+        """Empty the grid and pause, so a pattern can be drawn before anything runs."""
+        self.session.clear()
+        self.session.paused = True
+        self._sim_time = 0.0
+        self._edit_hold = 0.0
+
+    def _toggle_alert_pause(self) -> None:
+        self.alert_pause = not self.alert_pause
+        self.session.auto_pause = self.alert_pause
+
+    def _auto_rotating(self) -> bool:
+        """Whether the torus turns by itself: the 3D camera's own state while it is shown (a
+        drag stops it), else the setting the next 3D view starts with."""
+        if self.torus_view is not None:
+            return bool(self.torus_view.camera.auto_rotate)
+        return self.auto_rotate
+
+    def _toggle_auto_rotate(self) -> None:
+        self.auto_rotate = not self._auto_rotating()
+        if self.torus_view is not None:
+            self.torus_view.camera.auto_rotate = self.auto_rotate
+
+    def _reset_camera(self) -> None:
+        if self.torus_view is not None:
+            self.torus_view.camera.reset()
+
+    def _show_help(self) -> None:
+        self.hints_visible = True
 
     def _set_fps(self, fps: int) -> None:
         """Live speed change from the FPS slider: the running session is kept."""
@@ -514,8 +598,10 @@ class App:
             self._set_torus_status(f"3D view unavailable: {_short_error(exc)}")
             return
 
+        view.camera.auto_rotate = self.auto_rotate
         self.torus_view = view
         self.view_mode = "3D"
+        self._stroke = None
         self._set_torus_status(None)
 
     def _on_gl_thread[T](self, fn: Callable[..., T], /, *args, **kwargs) -> T:
@@ -540,6 +626,7 @@ class App:
         self.view_mode = "2D"
         self._set_torus_status(status)
         if view is not None:
+            self.auto_rotate = bool(view.camera.auto_rotate)  # a drag that stopped it counts
             self._on_gl_thread(view.release)
 
     def _release_gl_context(self) -> None:
@@ -594,16 +681,28 @@ class App:
                 self.torus_view.handle_event(event, self.layout.grid_rect())
                 continue
 
-            if (
-                event.type == pygame.MOUSEBUTTONDOWN
-                and event.button == 1
-                and self.view_mode == "2D"
-            ):
-                grid_rect = self.layout.grid_rect()
-                if grid_rect.collidepoint(event.pos):
-                    self._toggle_cell(event.pos)
+            self._handle_grid_event(event)
 
         return True
+
+    def _handle_grid_event(self, event: pygame.event.Event) -> None:
+        """2D editing: a click on the grid starts a stroke, a drag continues it, the release
+        (or a lost one) ends it."""
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            self._stroke = None
+            if self.layout.grid_rect().collidepoint(event.pos):
+                target = self._toggle_cell(event.pos)
+                if target is not None:  # the drag paints what the click did
+                    self._stroke, self._stroke_pos = target, event.pos
+        elif event.type == pygame.MOUSEMOTION and self._stroke is not None:
+            if getattr(event, "buttons", (1,))[0]:
+                self._paint_to(event.pos)
+            else:
+                self._stroke = None  # the release happened outside the window
+        elif (event.type == pygame.MOUSEBUTTONUP and event.button == 1) or (
+            event.type == pygame.WINDOWFOCUSLOST
+        ):
+            self._stroke = None
 
     def _handle_help_event(self, event: pygame.event.Event) -> bool:
         """While the help overlay is open: '?', F1, Esc or a click closes it, and no other
@@ -659,6 +758,8 @@ class App:
             self._step_once()
         elif event.key == pygame.K_v:
             self._toggle_view_mode()
+        elif event.key == pygame.K_c:
+            self._clear_grid()
         elif (species := self._species_key(event)) is not None:
             self._select_species(species)
         else:
@@ -696,13 +797,33 @@ class App:
         grid = self.session.grid
         return render.fit_grid(grid.shape, grid.width, grid.height, self.layout.grid_rect())
 
-    def _toggle_cell(self, pos: tuple[int, int]) -> None:
-        """Place the chosen species on the clicked cell, or clear it if it already holds it."""
+    def _toggle_cell(self, pos: tuple[int, int]) -> int | None:
+        """Place the chosen species on the clicked cell, or clear it if it already holds it.
+        Returns what the cell now holds (a species id, or 0), or None if no cell was hit."""
         index = self._grid_layout().cell_at(*pos)
         if index is None or not self.lifeforms:
-            return
+            return None
         species = self.lifeforms[self.selected_species - 1].id
         target = 0 if int(self.session.grid.occupancy[index]) == species else species
+        self._edit_cell(index, target)
+        return target
+
+    def _paint_to(self, pos: tuple[int, int]) -> None:
+        """Continue a stroke: paint every cell on the straight line from the last pointer
+        position to `pos`, so a fast drag leaves no gaps."""
+        if self._stroke is None:
+            return
+        layout = self._grid_layout()
+        (x0, y0), (x1, y1) = self._stroke_pos, pos
+        step = max(1.0, layout.cell_size / 3)
+        samples = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / step))
+        for k in range(1, samples + 1):
+            index = layout.cell_at(x0 + (x1 - x0) * k / samples, y0 + (y1 - y0) * k / samples)
+            if index is not None:
+                self._edit_cell(index, self._stroke)
+        self._stroke_pos = pos
+
+    def _edit_cell(self, index: int, target: int) -> None:
         if self.session.set_cell(index, target) and not self.session.paused:
             self._edit_hold = EDIT_HOLD_SECONDS
 
@@ -712,7 +833,7 @@ class App:
         if self.torus_view is not None:
             return f"Drag to rotate · wheel to zoom · V for 2D   ·   {HELP_HINT}"
         if len(self.lifeforms) > 1:
-            return f"Clicks place species {self.selected_species}   ·   {HELP_HINT}"
+            return f"Click or drag to paint species {self.selected_species}   ·   {HELP_HINT}"
         return HELP_HINT
 
     def _draw(self) -> None:
@@ -733,7 +854,11 @@ class App:
             self.screen, self.fonts, 16, cursor_y, panel_rect.width - 32, self.session
         )
         cursor_y += 16
-        self.settings_panel.draw(
+        panel = self.settings_panel
+        panel.view_mode = self.view_mode
+        panel.auto_rotate = self._auto_rotating()
+        panel.alert_pause = self.alert_pause
+        panel.draw(
             self.screen,
             16,
             cursor_y,
@@ -824,6 +949,9 @@ class App:
     def _advance_simulation(self, seconds: float) -> None:
         """Run the generations owed after `seconds` of wall time at `config.ui.fps`."""
         if self.session.paused:
+            self._sim_time = 0.0
+            return
+        if self._stroke is not None:  # a drag on the grid holds the run until released
             self._sim_time = 0.0
             return
         if self._edit_hold > 0:

@@ -58,6 +58,8 @@ class Button:
     font: pygame.font.Font
     primary: bool = False
     on_click: Callable[[], None] | None = None
+    # A disabled button is drawn dimmed and takes a click without acting on it.
+    enabled: bool = True
 
     def is_hovered(self, mouse_pos: tuple[int, int]) -> bool:
         return self.rect.collidepoint(mouse_pos)
@@ -67,6 +69,12 @@ class Button:
         self.rect = pygame.Rect(0, 0, 0, 0)
 
     def draw(self, surface: pygame.Surface) -> None:
+        if not self.enabled:
+            pygame.draw.rect(surface, PANEL_BACKGROUND_COLOR, self.rect, border_radius=6)
+            pygame.draw.rect(surface, BUTTON_COLOR, self.rect, 1, border_radius=6)
+            label = self.font.render(self.text, True, PLACEHOLDER_COLOR)
+            blit_clipped(surface, label, label.get_rect(center=self.rect.center), self.rect)
+            return
         hovered = self.is_hovered(pygame.mouse.get_pos())
         fill = ACCENT_PRIMARY if self.primary else (BUTTON_HOVER_COLOR if hovered else BUTTON_COLOR)
         pygame.draw.rect(surface, fill, self.rect, border_radius=BUTTON_BORDER_RADIUS)
@@ -77,7 +85,7 @@ class Button:
     def handle_event(self, event: pygame.event.Event) -> bool:
         is_click = event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
         if is_click and self.is_hovered(event.pos):
-            if self.on_click is not None:
+            if self.enabled and self.on_click is not None:
                 self.on_click()
             return True
         return False
@@ -252,6 +260,8 @@ class NumericInput(_FocusableInput):
     max_val: int
     font: pygame.font.Font
     on_commit: Callable[[int], None] | None = None
+    # Shown, dimmed, in place of a 0 while the field is not being typed in (e.g. "random").
+    zero_text: str | None = None
     text: str = field(init=False)
     active: bool = field(default=False, init=False)
     invalid: bool = field(default=False, init=False)
@@ -295,6 +305,10 @@ class NumericInput(_FocusableInput):
     def draw(self, surface: pygame.Surface, rect: pygame.Rect) -> None:
         self.rect = rect
         self._draw_box(surface, rect, radius=3)
+        if self.zero_text is not None and not self.active and self.text in ("", "0"):
+            label = self.font.render(self.zero_text, True, PLACEHOLDER_COLOR)
+            self._draw_text(surface, rect, label, centered=True)
+            return
         label = self.font.render(self.text or ("" if self.active else "0"), True, TEXT_COLOR)
         self._draw_text(surface, rect, label, centered=True)
 
@@ -449,6 +463,8 @@ class Dropdown:
     font: pygame.font.Font
     selected: str | None = None
     on_commit: Callable[[str], None] | None = None
+    # The box's text while nothing is selected (a menu that acts on choice keeps it None).
+    placeholder: str = "Select..."
     active: bool = field(default=False, init=False)
     scroll_y: int = field(default=0, init=False)
     rect: pygame.Rect | None = field(default=None, init=False)
@@ -522,9 +538,13 @@ class Dropdown:
         pygame.draw.rect(surface, BUTTON_COLOR, rect, border_radius=4)
         border = TEXT_COLOR if self.active else BUTTON_HOVER_COLOR
         pygame.draw.rect(surface, border, rect, 2, border_radius=4)
-        label_text = self.selected if self.selected is not None else "Select..."
-        label = self.font.render(label_text, True, TEXT_COLOR)
-        blit_clipped(surface, label, label.get_rect(midleft=(rect.x + 8, rect.centery)), rect)
+        if self.selected is not None:
+            label = self.font.render(self.selected, True, TEXT_COLOR)
+        else:
+            label = self.font.render(self.placeholder, True, PLACEHOLDER_COLOR)
+        # The text stops short of the chevron.
+        text_box = pygame.Rect(rect.x, rect.y, max(0, rect.width - 26), rect.height)
+        blit_clipped(surface, label, label.get_rect(midleft=(rect.x + 8, rect.centery)), text_box)
         # Chevron at the right end, drawn rather than typed (font-independent).
         cx, cy = rect.right - 14, rect.centery
         pygame.draw.polygon(surface, TEXT_COLOR, [(cx - 4, cy - 2), (cx + 4, cy - 2), (cx, cy + 3)])

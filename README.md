@@ -22,6 +22,19 @@ uv run python -m latticelife.cli soup --shape hexagon --rule B2/S34    # objects
 `census`, `sweep` and `soup` are the mathematics experiments: exact periods, phase diagrams and
 object catalogues per lattice, written as JSONL and resumable. See `docs/experiments.md`.
 
+In `ui`, the settings panel holds every setting and the actions the keys run:
+
+- **Grid**: shape, size, wrap, triangle neighbourhood, starting density and seed (staged until
+  Apply, which reads "Apply changes" while something is pending).
+- **Speed**: generations per second, and whether a sudden-death alert pauses the run.
+- **Species**: count, a preset-rule menu (Life-like classics, and the hexagon ships and rules
+  from the census), and each species' birth and survival counts.
+- **View**: 2D/3D (`V`), torus auto-rotation, camera reset and the shortcut help (`?`).
+- **Drawing and examples**: load a ready-made example (Conway's glider, LWSS, Gosper gun,
+  pulsar and R-pentomino; four hexagon spaceships and a period-48 hexagon oscillator), placed
+  on a clear grid and paused, and clear the grid (`C`) to draw your own. Click or drag on the
+  grid to paint the chosen species.
+
 3D torus rendering (the `V` key in `ui`) needs the optional extra: `uv sync --extra torus`.
 
 Requires Python 3.12 or 3.13: the locked pygame and moderngl releases ship wheels for those only.

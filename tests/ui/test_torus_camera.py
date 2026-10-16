@@ -213,3 +213,19 @@ def test_wheel_zooms_only_over_the_area_and_once_per_step():
     # pygame also posts the legacy button-4 press for the same wheel step: it must not zoom.
     assert not camera.handle_event(_down(AREA.center, button=4), AREA)
     assert camera.distance == pytest.approx(2.7)
+
+
+def test_reset_puts_the_camera_back_and_leaves_rotation_alone():
+    camera = OrbitalCamera()
+    camera.handle_mouse_down((0, 0))
+    camera.handle_mouse_move((40, 25))
+    camera.handle_scroll(4)
+    assert camera.auto_rotate is False
+    camera.reset()
+    start = OrbitalCamera()
+    assert (camera.distance, camera.azimuth, camera.elevation) == (
+        start.distance,
+        start.azimuth,
+        start.elevation,
+    )
+    assert not camera.dragging and camera.auto_rotate is False

@@ -571,7 +571,7 @@ def test_a_focused_field_a_smaller_window_squeezes_out_of_view_commits(make_app,
     u = ui(app)
     u.frame()
     panel = app.settings_panel
-    birth = panel.rule_inputs[5][0]
+    birth = panel.rule_inputs[1][0]
     assert panel._content_clip.contains(birth.rect)
     u.click(birth.rect.center)
     u.type("4")
@@ -610,7 +610,7 @@ def test_a_click_in_the_same_frame_as_the_scroll_meets_the_scrolled_widgets(make
     u = ui(app)
     u.frame()
     panel = app.settings_panel
-    spot = panel.rule_inputs[4][0].rect.center  # species 6's birth field after one notch
+    spot = panel.rule_inputs[1][0].rect.center  # species 3's birth field after one notch
 
     pygame.event.post(
         pygame.event.Event(pygame.MOUSEMOTION, pos=(150, 400), rel=(0, 0), buttons=(0, 0, 0))
@@ -620,7 +620,7 @@ def test_a_click_in_the_same_frame_as_the_scroll_meets_the_scrolled_widgets(make
     u.frame()
 
     assert panel.scroll_y == panel_module.WHEEL_STEP
-    assert panel.rule_inputs[5][0].active and not panel.rule_inputs[4][0].active
+    assert panel.rule_inputs[2][0].active and not panel.rule_inputs[1][0].active
 
 
 def test_only_the_visible_part_of_a_field_counts_as_on_it(make_app, ui):

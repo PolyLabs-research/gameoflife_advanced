@@ -90,6 +90,13 @@ class OrbitalCamera:
     def dragging(self) -> bool:
         return self._last_mouse_pos is not None
 
+    def reset(self) -> None:
+        """Back to the starting distance and angles (auto-rotation is left as it is)."""
+        self.distance = DEFAULT_DISTANCE
+        self.azimuth = 0.0
+        self.elevation = 0.3
+        self._last_mouse_pos = None
+
     def handle_event(self, event: pygame.event.Event, area: pygame.Rect) -> bool:
         """Camera input for a view drawn over `area`. A left-button press on the area starts a
         drag that rotates the camera until the button is released, wherever the pointer goes;

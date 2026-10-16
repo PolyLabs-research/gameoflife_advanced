@@ -227,6 +227,14 @@ class SimulationSession:
         self.restart_alert_window()
         return True
 
+    def clear(self) -> None:
+        """Empty every cell between steps (to draw a pattern by hand). Like `set_cell`, an
+        edit: the sudden-death window restarts, so the empty grid is never reported as a
+        collapse, and the generation count and history are left as they were."""
+        self.grid.occupancy[:] = 0
+        self.grid.lifespans[:] = 0
+        self.restart_alert_window()
+
     def restart_alert_window(self) -> None:
         """Start the sudden-death window afresh from the current generation: alive counts
         recorded before now are kept in `history_alive` (the chart reads them) but no longer
