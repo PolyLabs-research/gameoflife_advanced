@@ -22,6 +22,7 @@ here, under the version that makes it.
   `DensityRow`, `DamageRow`, `EventTimeRow`, `CurveRow`, `ObjectSizeRow`
 - `experiments.cost`: `CostHint`, `cost_hint`, `task_cost`, `measure_seconds_per_step`
 - `experiments.series`: `count_series`
+- `experiments.local`: `LocalTask`, `LocalRecord`, `local_point`, `run_local`, `RECORD_KEY`
 
 Record files are append-only JSONL. A new field may be added to a record; an existing field is
 never renamed, retyped or given a new meaning. Readers treat a missing new field as its
@@ -29,6 +30,12 @@ documented default (see `observables.no_repeat_before`).
 
 ## Unreleased
 
+- **Local transients** (`experiments.local`): when each b x b block of the grid enters the
+  soup's final cycle. A second pass compares every state with the one a period earlier; a
+  block's local transient is one past the last generation it differed. The largest is the
+  soup's own transient, checked on every run. For extreme-value accounts of settling times,
+  which treat the global transient as the largest of many local ones. New stable names:
+  `LocalTask`, `LocalRecord`, `local_point`, `run_local`.
 - **Counts over time** (`experiments.series.count_series`): live cells, cumulative births and
   deaths, and live and dead cells by live-neighbour count at every generation of one run, for a
   search for conserved quantities. Four bookkeeping identities hold by construction and are

@@ -208,6 +208,14 @@ deaths, and live and dead cells by live-neighbour count at every generation: int
 a search for conserved quantities. Its bookkeeping identities (live = live(0) + births - deaths,
 and three more) are what such a search should find first on any rule.
 
+`experiments.local.local_point` gives, for one soup, every b x b block's **local transient**:
+the first generation from which that block repeats with the soup's period (blocks are in the
+grid's row and column indices, so contiguous patches on every lattice). It runs the soup
+twice: once to find the transient T and period P, and once more comparing each state with the
+one P generations earlier. The largest local transient is T, and every run checks that. A soup
+that does not repeat within `steps`, or whose period exceeds `max_period`, has none (the
+second pass holds P grids). `run_local` writes one resumable JSONL record per run.
+
 `experiments.cost` prices a task before it runs: generations times cells (a cap, so an upper
 bound), and seconds from `measure_seconds_per_step` on this machine.
 

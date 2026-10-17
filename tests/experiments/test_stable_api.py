@@ -68,6 +68,19 @@ SIGNATURES = {
     "observables.kaplan_meier_median": ["times", "censored", "never"],
     "observables.damage_curves": ["records"],
     "series.count_series": ["config", "rule", "shape", "grid", "density", "seed", "steps"],
+    "local.local_point": ["task"],
+    "local.run_local": [
+        "config",
+        "rule",
+        "shape",
+        "grids",
+        "densities",
+        "seeds",
+        "steps",
+        "out_path",
+        "blocks",
+        "workers",
+    ],
     "observables.object_sizes": ["records"],
     "cost.task_cost": ["task", "seconds_per_step"],
     "cost.measure_seconds_per_step": [
@@ -82,6 +95,32 @@ SIGNATURES = {
 }
 
 FIELDS = {
+    "local.LocalTask": [
+        "config",
+        "rule",
+        "shape",
+        "grid",
+        "density",
+        "seed",
+        "steps",
+        "blocks",
+        "max_period",
+    ],
+    "local.LocalRecord": [
+        "rule",
+        "shape",
+        "triangle_mode",
+        "grid",
+        "density",
+        "seed",
+        "steps",
+        "blocks",
+        "transient",
+        "period",
+        "stopped_at",
+        "local",
+        "note",
+    ],
     "sweeps.SweepTask": ["config", "rule", "shape", "grid", "density", "seed", "steps"],
     "sweeps.SweepRecord": [
         "rule",
