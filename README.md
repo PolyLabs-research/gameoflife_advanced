@@ -27,7 +27,8 @@ See `latticelife_rebuild_spec_v1.0.md` (in the legacy repo) for the full rebuild
 - **A stable library interface.** Other projects drive the experiments from Python, as the
   law-discovery loop [lattice-lab](https://github.com/tripptytrip/lattice-lab) does: sessions,
   sweeps, census, damage, and observables. The observables cover settling times, survival, event
-  times (exact or censored), whole damage curves per seed, object sizes, and counts over time.
+  times (exact or censored), whole damage curves per seed, object sizes, counts over time, and
+  local transients (when each block of the torus enters the soup's final cycle).
   The names are pinned by tests, and any change to them is noted in `docs/CHANGELOG.md`.
 
 ## Screenshots
@@ -124,8 +125,9 @@ predictions before the runs that test them. On LatticeLife's own lattices:
   rejected a power law. A second registered test drew eight random rules on the square,
   hexagon and both triangular lattices. All eight settle logarithmically. Their seed-to-seed
   fluctuations have one shape and one ratio of spread to growth on every lattice, both
-  consistent with the Gumbel law for the largest of about L^2 independent local times. See
-  lattice-lab's
+  consistent with the Gumbel law for the largest of about L^2 local times. Measured directly
+  with `experiments.local`, B2/S34's local settling times are the same on tori of 256 and 1024,
+  but late regions cluster, so they are not independent. See lattice-lab's
   [docs/settling-time.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/settling-time.md).
 - **A conserved parity.** Under B1357/S1357, cumulative births are always even. This was found
   from `count_series` data and then proved: it holds for the parity rule on any lattice whose
