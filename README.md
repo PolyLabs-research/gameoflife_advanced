@@ -21,7 +21,14 @@ See `latticelife_rebuild_spec_v1.0.md` (in the legacy repo) for the full rebuild
   for a sudden population crash and for stasis, and a 3D view of the wrapped grid on its torus.
 - **Headless instruments.** `autorun` records every generation of batches of sessions to
   SQLite, `discover` runs a (mu+lambda) search for rules near criticality, and `census`,
-  `sweep` and `soup` give exact periods, phase diagrams and object catalogues per lattice.
+  `sweep`, `soup` and `damage` give exact periods, phase diagrams, object catalogues and damage
+  spreading per lattice. `observe` turns their records into numbers with intervals, and says
+  when a number is only a bound.
+- **A stable library interface.** Other projects drive the experiments from Python, as the
+  law-discovery loop [lattice-lab](https://github.com/tripptytrip/lattice-lab) does: sessions,
+  sweeps, census, damage, and observables. The observables cover settling times, survival, event
+  times (exact or censored), whole damage curves per seed, object sizes, and counts over time.
+  The names are pinned by tests, and any change to them is noted in `docs/CHANGELOG.md`.
 
 ## Screenshots
 
@@ -77,12 +84,46 @@ uv run python -m latticelife.cli observe transient out/sweep-hexagon-B2S34.jsonl
 `census`, `sweep`, `soup` and `damage` are the mathematics experiments: exact periods, phase
 diagrams, object catalogues and damage spreading per lattice, on square or rectangular tori
 (`--grid 24x26`), written as JSONL and resumable. `observe` turns their records into numbers with
-intervals and says when a number is only a bound. See `docs/experiments.md`; the interface other
-projects use is kept stable and changes are noted in `docs/CHANGELOG.md`.
+intervals and says when a number is only a bound. It reports settling time, survival, damage,
+the time to a first repeat or to extinction (exact or a bound), every seed's damage curve, and
+object sizes. See `docs/experiments.md`; the interface other projects use is kept stable and
+changes are noted in `docs/CHANGELOG.md`.
 
 3D torus rendering (the `V` key in `ui`) needs the optional extra: `uv sync --extra torus`.
 
 Requires Python 3.12 or 3.13: the locked pygame and moderngl releases ship wheels for those only.
+
+## What has been found with it
+
+[lattice-lab](https://github.com/tripptytrip/lattice-lab) runs LatticeLife experiments, fits
+laws to them with [Kepler](https://github.com/tripptytrip/kepler), and registers each law's
+predictions before the runs that test them. On LatticeLife's own lattices:
+
+- **Periods of the parity rules**, where each cell becomes the parity of its live neighbours. The
+  rules are B1357/S1357 on the square lattice, B135/S135 on the hexagon, and B13/S13 and
+  B1,3,...,11/S1,3,...,11 on the triangle. On an n x n torus, write n = 2^v(n) m with m odd.
+  - *Square:* the period is 2^v(n) (2^sord(m) - 1) when n is not a power of 2, where sord(m) is
+    the least j with 2^j = +-1 modulo m.
+  - *Triangles:* for m >= 3, both rules have period 2 * 2^v(n) (2^sord(m) - 1).
+  - *Hexagon:* the rule shares the shortfalls of the 1D rule 90, because two hexagon generations
+    are three passes of rule 90, one along each lattice direction. For m >= 5 its period is
+    2 * 2^v(n) times rule 90's on m cells.
+
+  These laws were found from simulations. They were then confirmed in advance at hundreds of
+  sizes by an exact algebraic engine; the hexagon's came after a first law was refuted at three
+  sizes. Before it was used, the engine reproduced LatticeLife's one-step adjacency cell for
+  cell and its simulated periods. The hexagon's law is proved for every even n. The others are
+  proved for every n whose odd part is at most 999, except ten odd parts, with one step
+  checked by machine. See lattice-lab's
+  [docs/parity-lattices.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/parity-lattices.md)
+  and
+  [docs/xor-periods.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/xor-periods.md).
+- **Settling time.** B2/S34 soups on the hexagonal lattice settle in a time logarithmic in the
+  torus size, T(L) = 37.6 log L - 36.3. It was fitted on L = 8 to 32 and passed at 64, 96 and 128.
+  It is one answer, to replicate with more seeds.
+- **A conserved parity.** Under B1357/S1357, cumulative births are always even. This was found
+  from `count_series` data and then proved: it holds for the parity rule on any lattice whose
+  cells all have an even number of neighbours.
 
 ## Configuration
 
