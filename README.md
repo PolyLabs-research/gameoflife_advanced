@@ -119,6 +119,15 @@ predictions before the runs that test them. On LatticeLife's own lattices:
   [docs/parity-lattices.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/parity-lattices.md)
   and
   [docs/xor-periods.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/xor-periods.md).
+- **Other linear rules.** The parity rules extend to every set of symmetric neighbour shells on
+  the three lattices: 42 rules, eight of which LatticeLife's rule strings can express (for
+  example B135/S0246 on the hexagon, B13/S02 on the triangle). An exact engine was checked
+  against LatticeLife's simulation and against a direct one. Laws found on tori up to 60 were
+  then confirmed in advance at 1,930 larger (rule, size) pairs.
+
+  After the test, the rules sorted into two families. Those whose polynomial factors into passes
+  of 1D rules share those rules' periods. The rest reach the full bound. See lattice-lab's
+  [docs/linear-atlas.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/linear-atlas.md).
 - **Settling time.** B2/S34 soups on the hexagonal lattice settle in a time logarithmic in the
   torus size, T(L) = 37.6 log L - 36.3. It was fitted on L = 8 to 32 and passed at 64, 96 and 128.
   A registered replication on tori up to 1024 (100 seeds each) confirmed the logarithm and
