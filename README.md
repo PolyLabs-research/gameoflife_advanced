@@ -120,7 +120,13 @@ predictions before the runs that test them. On LatticeLife's own lattices:
   [docs/xor-periods.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/xor-periods.md).
 - **Settling time.** B2/S34 soups on the hexagonal lattice settle in a time logarithmic in the
   torus size, T(L) = 37.6 log L - 36.3. It was fitted on L = 8 to 32 and passed at 64, 96 and 128.
-  It is one answer, to replicate with more seeds.
+  A registered replication on tori up to 1024 (100 seeds each) confirmed the logarithm and
+  rejected a power law. A second registered test drew eight random rules on the square,
+  hexagon and both triangular lattices. All eight settle logarithmically. Their seed-to-seed
+  fluctuations have one shape and one ratio of spread to growth on every lattice, both
+  consistent with the Gumbel law for the largest of about L^2 independent local times. See
+  lattice-lab's
+  [docs/settling-time.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/settling-time.md).
 - **A conserved parity.** Under B1357/S1357, cumulative births are always even. This was found
   from `count_series` data and then proved: it holds for the parity rule on any lattice whose
   cells all have an even number of neighbours.
