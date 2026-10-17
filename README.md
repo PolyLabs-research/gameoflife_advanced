@@ -126,7 +126,12 @@ predictions before the runs that test them. On LatticeLife's own lattices:
   then confirmed in advance at 1,930 larger (rule, size) pairs.
 
   After the test, the rules sorted into two families. Those whose polynomial factors into passes
-  of 1D rules share those rules' periods. The rest reach the full bound. See lattice-lab's
+  of 1D rules share those rules' periods. The rest reach the full bound.
+
+  A second registered round tested that pattern. All 34 laws held at 624 larger sizes. For 112
+  rules nobody had computed, 106 of 113 predictions held. The failures were perfect cubes and a
+  rule on every third cell (both confine the rule without splitting it), plus four single-size
+  accidents. See lattice-lab's
   [docs/linear-atlas.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/linear-atlas.md).
 - **Settling time.** B2/S34 soups on the hexagonal lattice settle in a time logarithmic in the
   torus size, T(L) = 37.6 log L - 36.3. It was fitted on L = 8 to 32 and passed at 64, 96 and 128.
