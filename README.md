@@ -31,7 +31,7 @@ the runs. See [What has been found with it](#what-has-been-found-with-it).
   spreading per lattice. `observe` turns their records into numbers with intervals, and says
   when a number is only a bound.
 - **A stable library interface.** Other projects drive the experiments from Python, as the
-  law-discovery loop [lattice-lab](https://github.com/tripptytrip/lattice-lab) does: sessions,
+  law-discovery loop [lattice-lab](https://github.com/PolyLabs-research/lattice-lab) does: sessions,
   sweeps, census, damage, and observables. The observables cover settling times, survival, event
   times (exact or censored), whole damage curves per seed, object sizes, counts over time, and
   local transients (when each block of the torus enters the soup's final cycle).
@@ -102,22 +102,22 @@ Requires Python 3.12 or 3.13: the locked pygame and moderngl releases ship wheel
 
 ## What has been found with it
 
-[lattice-lab](https://github.com/tripptytrip/lattice-lab) runs LatticeLife experiments, fits
-laws to them with [Kepler](https://github.com/tripptytrip/kepler), and registers each law's
+[lattice-lab](https://github.com/PolyLabs-research/lattice-lab) runs LatticeLife experiments, fits
+laws to them with [Kepler](https://github.com/PolyLabs-research/kepler), and registers each law's
 predictions before the runs that test them. Each prediction goes in a hash-chained ledger that is
 committed and pushed first, so the order can be checked: `uv run lattice-lab verify --lab
 <study>` in lattice-lab.
 
 | Finding | Status | Write-up |
 | --- | --- | --- |
-| Period of the square parity rule, B1357/S1357 | confirmed in advance at every n up to 200; proved for odd parts up to 999 except ten | [xor-periods.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/xor-periods.md) |
-| Period of the hexagon parity rule, B135/S135 | the first law was refuted at 3 sizes; the corrected law was confirmed at 100 and **proved for every even n** | [parity-lattices.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/parity-lattices.md) |
-| Periods of the triangle parity rules | confirmed at 154 sizes; the factor 2 * 2^v(n) is proved; the odd part is checked by machine for odd parts up to 999 except ten | [parity-lattices.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/parity-lattices.md) |
-| Periods of 42 linear rules built from neighbour shells, 38 never studied | Kepler's laws confirmed blind at 1,930 (rule, size) pairs, then at 624 harder ones up to n = 400 | [linear-atlas.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/linear-atlas.md) |
-| "A rule that factors into 1D passes has a 1D period; any other reaches the full bound" | registered and **refuted**: 7 of 113 predictions failed. The failures showed two more mechanisms, perfect cubes and dilations, then predicted exactly | [linear-atlas.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/linear-atlas.md) |
-| The refined statement, on 344 rules nobody has computed | **registered; running now**: 11,358 predictions on all three lattices | [linear-atlas.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/linear-atlas.md) (to follow) |
-| Settling time of B2/S34 soups on the hexagon | the logarithmic law was replicated on tori up to 1024; across eight random rules on four lattice types, the fluctuations have one shape (extreme-value statistics) | [settling-time.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/settling-time.md) |
-| Births under B1357/S1357 | cumulative births are always even: found in data, then proved | [capabilities.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/capabilities.md) |
+| Period of the square parity rule, B1357/S1357 | confirmed in advance at every n up to 200; proved for odd parts up to 999 except ten | [xor-periods.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/xor-periods.md) |
+| Period of the hexagon parity rule, B135/S135 | the first law was refuted at 3 sizes; the corrected law was confirmed at 100 and **proved for every even n** | [parity-lattices.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/parity-lattices.md) |
+| Periods of the triangle parity rules | confirmed at 154 sizes; the factor 2 * 2^v(n) is proved; the odd part is checked by machine for odd parts up to 999 except ten | [parity-lattices.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/parity-lattices.md) |
+| Periods of 42 linear rules built from neighbour shells, 38 never studied | Kepler's laws confirmed blind at 1,930 (rule, size) pairs, then at 624 harder ones up to n = 400 | [linear-atlas.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/linear-atlas.md) |
+| "A rule that factors into 1D passes has a 1D period; any other reaches the full bound" | registered and **refuted**: 7 of 113 predictions failed. The failures showed two more mechanisms, perfect cubes and dilations, then predicted exactly | [linear-atlas.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/linear-atlas.md) |
+| The refined statement, on 344 rules nobody has computed | registered and **refuted**: 43 of 11,358 predictions failed (0.4%); every cube and dilation held; the failures showed a third mechanism, then predicted it exactly | [linear-atlas.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/linear-atlas.md) |
+| Settling time of B2/S34 soups on the hexagon | the logarithmic law was replicated on tori up to 1024; across eight random rules on four lattice types, the fluctuations have one shape (extreme-value statistics) | [settling-time.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/settling-time.md) |
+| Births under B1357/S1357 | cumulative births are always even: found in data, then proved | [capabilities.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/capabilities.md) |
 
 In more detail:
 
@@ -137,9 +137,9 @@ In more detail:
   cell and its simulated periods. The hexagon's law is proved for every even n. The others are
   proved for every n whose odd part is at most 999, except ten odd parts, with one step
   checked by machine. See lattice-lab's
-  [docs/parity-lattices.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/parity-lattices.md)
+  [docs/parity-lattices.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/parity-lattices.md)
   and
-  [docs/xor-periods.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/xor-periods.md).
+  [docs/xor-periods.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/xor-periods.md).
 - **Other linear rules.** The parity rules extend to every set of symmetric neighbour shells on
   the three lattices: 42 rules, eight of which LatticeLife's rule strings can express (for
   example B135/S0246 on the hexagon, B13/S02 on the triangle). An exact engine was checked
@@ -156,10 +156,13 @@ In more detail:
   polynomial along each axis, and that polynomial sends all of rule 90's values into the subfield
   F(8). A small field makes that kind of coincidence likely.
 
-  A third round is registered and running. The refined statement, written as a fixed procedure,
-  predicts the odd part of each period for 344 new rules on all three lattices: 11,358
-  predictions, small sizes included. See lattice-lab's
-  [docs/linear-atlas.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/linear-atlas.md).
+  A third registered round wrote the refined statement as a fixed procedure. It predicted the
+  odd part of each period for 344 new rules on all three lattices: 11,358 predictions, small sizes
+  included. 43 failed (0.4%). Every cube and dilation prediction held. One rule is the edge rule
+  times its own dilation by 3, a disguised power, and an expectation written during the run
+  predicted all 34 of its sizes. The rest are coincidences in small fields, plus one open case at
+  m = 37. See lattice-lab's
+  [docs/linear-atlas.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/linear-atlas.md).
 - **Settling time.** B2/S34 soups on the hexagonal lattice settle in a time logarithmic in the
   torus size, T(L) = 37.6 log L - 36.3. It was fitted on L = 8 to 32 and passed at 64, 96 and 128.
   A registered replication on tori up to 1024 (100 seeds each) confirmed the logarithm and
@@ -169,7 +172,7 @@ In more detail:
   consistent with the Gumbel law for the largest of about L^2 local times. Measured directly
   with `experiments.local`, B2/S34's local settling times are the same on tori of 256 and 1024,
   but late regions cluster, so they are not independent. See lattice-lab's
-  [docs/settling-time.md](https://github.com/tripptytrip/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/settling-time.md).
+  [docs/settling-time.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/settling-time.md).
 - **A conserved parity.** Under B1357/S1357, cumulative births are always even. This was found
   from `count_series` data and then proved: it holds for the parity rule on any lattice whose
   cells all have an even number of neighbours.
