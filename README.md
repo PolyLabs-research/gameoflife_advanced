@@ -119,6 +119,9 @@ committed and pushed first, so the order can be checked: `uv run lattice-lab ver
 | Settling time of B2/S34 soups on the hexagon | the logarithmic law was replicated on tori up to 1024; across eight random rules on four lattice types, the fluctuations have one shape (extreme-value statistics) | [settling-time.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/settling-time.md) |
 | Births under B1357/S1357 | cumulative births are always even: found in data, then proved | [capabilities.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/capabilities.md) |
 
+Where things stand, and what is open, is in lattice-lab's
+[docs/STATUS.md](https://github.com/PolyLabs-research/lattice-lab/blob/ccr-ab9f0bb1-qb20sx/docs/STATUS.md).
+
 In more detail:
 
 - **Periods of the parity rules**, where each cell becomes the parity of its live neighbours. The
