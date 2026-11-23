@@ -60,6 +60,7 @@ from latticelife.config import (
     project_root_for,
 )
 from latticelife.core.geometries import SHAPES, max_degree, validate_dimensions
+from latticelife.core.lattice import TIE_BREAKS
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
 from latticelife.discovery.worker import EXIT_LOCKED, STOP_SIGNALS, DiscoveryWorker
@@ -144,17 +145,33 @@ _PROGRESS_EVERY = 100
 _GRID_HELP = "torus sizes: L for a square torus, WxH for a rectangle (default 32)"
 
 
+_TIE_BREAK_HELP = (
+    "who is born in a dead cell that two or more species could be born into: random (a draw, "
+    "equal chances), standoff (nobody), strongest (the one with the most cells nearby) or "
+    "weighted (a draw, chances by cells nearby). Default: the config's simulation.tie_break"
+)
+
+
+def _with_tie_break(config: Config, kind: str | None) -> Config:
+    """`config` with `--tie-break` in place of its simulation.tie_break, when the option was
+    given. The radius and the power stay the config's."""
+    if kind is None:
+        return config
+    return replace(config, simulation=replace(config.simulation, tie_break=kind))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="latticelife")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     autorun = subparsers.add_parser(
-        "autorun", help="Fully headless batch of sessions, recorded to schema v2."
+        "autorun", help="Fully headless batch of sessions, recorded to an SQLite database."
     )
     autorun.add_argument("--sessions", type=_positive_int, required=True)
     autorun.add_argument("--generations", type=_positive_int, required=True)
     autorun.add_argument("--shape", choices=(*SHAPES, "random"), default="random")
     autorun.add_argument("--db", type=Path, default=None)
+    autorun.add_argument("--tie-break", choices=TIE_BREAKS, default=None, help=_TIE_BREAK_HELP)
     autorun.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
 
     discover = subparsers.add_parser(
@@ -165,6 +182,7 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
 
     ui = subparsers.add_parser("ui", help="Interactive pygame app.")
+    ui.add_argument("--tie-break", choices=TIE_BREAKS, default=None, help=_TIE_BREAK_HELP)
     ui.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
 
     census_parser = subparsers.add_parser(
@@ -371,7 +389,7 @@ def _termination_interrupts() -> Iterator[None]:
 def run_autorun(args: argparse.Namespace) -> dict:
     """Run and record the batch. Returns the summary: `sessions` completed, `generations`
     recorded in total, the DB path, and `interrupted: true` when it was stopped early."""
-    config = _load_config(args.config)
+    config = _with_tie_break(_load_config(args.config), args.tie_break)
     _check_autorun_shapes(config, args.shape)
     db_path = args.db if args.db is not None else Path(config.recording.db_path)
     try:
@@ -824,7 +842,7 @@ def run_ui(args: argparse.Namespace) -> None:
     in pygame on their path (§6.13's headless commands must never import pygame)."""
     from latticelife.ui.app import App
 
-    config = _load_config(args.config)
+    config = _with_tie_break(_load_config(args.config), args.tie_break)
     App(config).run()
 
 

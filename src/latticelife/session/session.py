@@ -108,6 +108,7 @@ class SimulationSession:
             config.grid.wrap,
             config.grid.triangle_mode,
             config.simulation.static_threshold,
+            tie_break=config.simulation.tie_break_rule(),
         )
 
         self.generation = 0

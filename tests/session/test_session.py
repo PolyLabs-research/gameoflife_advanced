@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from latticelife.config import load_config
+from latticelife.core.lattice import TieBreak
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule
 from latticelife.session.alerts import AlertKind
@@ -680,3 +681,35 @@ def test_run_memory_does_not_grow_with_the_number_of_generations():
         tracemalloc.stop()
 
     assert peak < 512 * 1024
+
+
+# --- the birth tie-break ------------------------------------------------------------------------
+
+
+def test_the_configs_tie_break_reaches_the_grid_and_contests_reach_the_record():
+    config = _config(
+        width=24, height=24, initial_alive_percentage=0.6, tie_break="strongest", tie_break_radius=3
+    )
+    species = [Lifeform(1, CONWAY), Lifeform(2, CONWAY), Lifeform(3, CONWAY)]
+    session = SimulationSession(config, species, seed=5, auto_pause=False)
+    assert session.grid.tie_break == TieBreak("strongest", 3, 1.0)
+    for _ in range(5):
+        result = session.step()
+        assert session.history_records[-1].grid_metrics.contested == result.contested
+    assert sum(r.result.contested for r in session.history_records) > 0
+    assert SimulationSession(_config(), [Lifeform(1, CONWAY)]).grid.tie_break == TieBreak()
+
+
+@pytest.mark.parametrize("kind", ["standoff", "strongest"])
+def test_a_session_with_a_deterministic_tie_break_is_a_function_of_its_start(kind):
+    """Two sessions seeded alike start alike; from there the generator plays no part, so a
+    third, stepped with another generator, stays with them."""
+    config = _config(width=24, height=24, initial_alive_percentage=0.6, tie_break=kind)
+    species = [Lifeform(1, CONWAY), Lifeform(2, CONWAY)]
+    first = SimulationSession(config, species, seed=9, auto_pause=False)
+    other = SimulationSession(config, species, seed=9, auto_pause=False)
+    other.rng = np.random.default_rng(12345)  # the start is drawn already; this is unused
+    for _ in range(20):
+        first.step()
+        other.step()
+        assert np.array_equal(first.grid.occupancy, other.grid.occupancy)

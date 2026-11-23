@@ -266,8 +266,11 @@ measurement: Conway's Life is not its own coarse rule, and the test says so at o
 
 ## Caveats
 
-- Everything here is single-species. With several species the birth tie-break is random, a
-  repeated state proves nothing, and `run_timeseries(detect_cycles=True)` refuses.
+- Everything here is single-species. With several species the birth tie-break is random by
+  default, a repeated state then proves nothing, and `run_timeseries(detect_cycles=True)`
+  refuses. With `simulation.tie_break` set to `standoff` or `strongest` a run of several
+  species is a function of its grid again, but these experiments do not run several species
+  yet, and the cycle detector does not tell species apart.
 - `unsettled` is relative to the run length: a transient of 1,000 generations on a 32x32 torus
   is not chaos. Compare several `--steps` before calling a rule chaotic, and read
   `no_repeat_before` as a bound on transient + period, never on the transient alone.

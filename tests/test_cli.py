@@ -25,6 +25,7 @@ from latticelife import logging as ll_logging
 from latticelife.config import DEFAULT_CONFIG_PATH
 from latticelife.discovery.worker import DiscoveryWorker, acquire_lineage_lock
 from latticelife.logging import LOG_DIR_ENV, configure_logging
+from latticelife.recording.recorder import _SCHEMAS
 from latticelife.session.session import SimulationSession
 
 SRC_DIR = Path(latticelife.__file__).resolve().parents[1]
@@ -150,6 +151,71 @@ def test_autorun_records_every_generation_past_the_history_limit(tmp_path, log_d
     # §6.6: the final generation of a run always has cluster metrics.
     finals = conn.execute("SELECT cluster_count FROM life_records WHERE generation = 40").fetchall()
     assert finals and all(count is not None for (count,) in finals)
+
+
+def _tie_breaks(db) -> set:
+    conn = sqlite3.connect(db)
+    try:
+        columns = "tie_break, tie_break_radius, tie_break_power"
+        return set(conn.execute(f"SELECT {columns} FROM session_metadata"))
+    finally:
+        conn.close()
+
+
+def test_autorun_records_the_tie_break_of_the_config_or_the_option(tmp_path, log_dir, capsys):
+    """The default is the random draw; --tie-break replaces the config's kind and keeps its
+    radius and power; every generation's contested cells are recorded."""
+    plain = tmp_path / "plain.db"
+    assert _autorun(write_config(tmp_path), plain, generations=5) == 0
+    assert _tie_breaks(plain) == {("random", 2, 1.0)}
+
+    config = write_config(
+        tmp_path, simulation__tie_break="weighted", simulation__tie_break_radius=3
+    )
+    weighted, level = tmp_path / "weighted.db", tmp_path / "level.db"
+    assert _autorun(config, weighted, generations=5) == 0
+    assert _tie_breaks(weighted) == {("weighted", 3, 1.0)}
+    assert _autorun(config, level, "--tie-break", "standoff", generations=5) == 0
+    assert _tie_breaks(level) == {("standoff", 3, 1.0)}
+    conn = sqlite3.connect(level)
+    contested = [row[0] for row in conn.execute("SELECT contested FROM generation_metrics")]
+    conn.close()
+    assert len(contested) == 10 and all(type(count) is int and count >= 0 for count in contested)
+
+
+def test_autorun_will_not_put_another_tie_break_into_a_db_from_before_the_setting(
+    tmp_path, log_dir, capsys
+):
+    """A schema v2 file holds sessions that drew at random and has no column to say otherwise:
+    one line, exit 2, nothing added. The same file still takes the random draw."""
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_SCHEMAS[2] + "PRAGMA user_version = 2;")
+    conn.close()
+    capsys.readouterr()
+
+    assert _autorun(write_config(tmp_path), db, "--tie-break", "standoff") == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "tie_break = 'standoff'" in err and "new file" in err and "Traceback" not in err
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM session_metadata").fetchone()[0] == 0
+    conn.close()
+
+    assert _autorun(write_config(tmp_path), db, generations=3) == 0
+    conn = sqlite3.connect(db)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM session_metadata").fetchone()[0] == 2
+    conn.close()
+
+
+def test_the_tie_break_option_is_one_of_the_four_kinds(capsys):
+    args = cli._build_parser().parse_args(["ui", "--tie-break", "strongest"])
+    assert args.tie_break == "strongest"
+    assert cli._build_parser().parse_args(["ui"]).tie_break is None
+    with pytest.raises(SystemExit):
+        cli._build_parser().parse_args(["autorun", "--sessions", "1", "--generations", "1",
+                                        "--tie-break", "coin"])  # fmt: skip
+    assert "invalid choice: 'coin'" in capsys.readouterr().err
 
 
 def test_autorun_runs_every_planned_generation_through_sudden_death(tmp_path, log_dir, capsys):
@@ -407,7 +473,7 @@ def test_autorun_refuses_a_db_that_is_not_schema_v2(tmp_path, log_dir, capsys):
     before = db.read_bytes()
 
     assert _autorun(write_config(tmp_path), db) == cli.EXIT_USAGE
-    assert "not a LatticeLife schema v2 database" in capsys.readouterr().err
+    assert "not a LatticeLife schema v2 or v3 database" in capsys.readouterr().err
     assert db.read_bytes() == before
 
 
@@ -425,7 +491,7 @@ def test_autorun_refuses_another_apps_db_that_also_uses_user_version_2(tmp_path,
     assert _autorun(write_config(tmp_path), db) == cli.EXIT_USAGE
     err = capsys.readouterr().err
     assert err.startswith("latticelife autorun: ") and err.count("\n") == 1
-    assert "not a LatticeLife schema v2 database (user_version=2, tables: users" in err
+    assert "not a LatticeLife schema v2 or v3 database (user_version=2, tables: users" in err
     assert db.read_bytes() == before
     assert not Path(f"{db}-wal").exists()
 

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from latticelife.core.geometries import SHAPES, TRIANGLE_MODES, validate_dimensions
+from latticelife.core.lattice import MAX_TIE_BREAK_RADIUS, TIE_BREAKS, TieBreak
 from latticelife.experiments.criticality import (
     BURN_IN_FRAC,
     Band,
@@ -100,6 +101,14 @@ class SimulationConfig:
     static_threshold: int
     history_limit: int
     seed: int
+    # The birth tie-break (`core.lattice.TieBreak`). Optional keys: a config written before
+    # they existed keeps the rule it always had.
+    tie_break: str = "random"
+    tie_break_radius: int = 2
+    tie_break_power: float = 1.0
+
+    def tie_break_rule(self) -> TieBreak:
+        return TieBreak(self.tie_break, self.tie_break_radius, self.tie_break_power)
 
 
 @dataclass(frozen=True)
@@ -402,6 +411,20 @@ def validate_config(config: Config) -> None:
     _check_range(sim.static_threshold, "simulation.static_threshold", 0)
     _check_range(sim.history_limit, "simulation.history_limit", 1)
     _check_range(sim.seed, "simulation.seed", 0)
+    _check(
+        sim.tie_break in TIE_BREAKS,
+        "simulation.tie_break",
+        f"one of {', '.join(TIE_BREAKS)}",
+        sim.tie_break,
+    )
+    _check_range(sim.tie_break_radius, "simulation.tie_break_radius", 1, MAX_TIE_BREAK_RADIUS)
+    # `not (x >= 0)` also refuses nan; a number too large to be a float never gets here.
+    _check(
+        sim.tie_break_power >= 0 and sim.tie_break_power != float("inf"),
+        "simulation.tie_break_power",
+        "a number >= 0",
+        sim.tie_break_power,
+    )
 
     _check_range(config.metrics.cluster_stride, "metrics.cluster_stride", 1)
 

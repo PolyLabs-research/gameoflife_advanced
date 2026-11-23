@@ -1,16 +1,25 @@
-"""SQLite schema v2 recorder (§6.9). Single-threaded: discovery is a separate process and never
+"""SQLite recorder (§6.9), schema v3. Single-threaded: discovery is a separate process and never
 touches this DB — it writes its own JSONL/checkpoints (§6.11). No `check_same_thread=False`, no
 lock. Fixed DDL, no runtime ALTER-TABLE migration code: recording starts fresh on schema v2, the
 legacy DB's lifespan-derived columns (D-1) and zero-filled metric columns (D-2) are not migrated
 (see the salvage manifest).
 
+Schema v3 is v2 with what the birth tie-break needs (`core.lattice.TieBreak`): each session's
+`tie_break`, `tie_break_radius` and `tie_break_power` in `session_metadata`, and each
+generation's `contested` cells in `generation_metrics`. A new file is v3. A schema v2 file,
+written before the tie-break was a setting, stays v2 and is recorded into as before, without
+those columns; every session in it drew at random, so it takes no session with another
+tie-break (`RecorderSchemaError`: record that one into a new file). No file is ever converted,
+and no column in any file means two things.
+
 Opening a file never modifies one that is not already ours: a new or empty file (`user_version`
-0 and no schema object of any kind) gets the v2 schema, `user_version = 2` and WAL; an existing
-schema v2 file (`user_version` 2, at least one of the four v2 tables and no other table; views,
-indexes and triggers of the user's own are fine) is checked table by table; any other file (the
-legacy `species.db`, a later schema, another application's database that also uses
-`user_version` 2, one holding only views/indexes/triggers, not SQLite at all) raises
-`RecorderSchemaError` before a single PRAGMA or DDL statement is written to it. A path SQLite
+0 and no schema object of any kind) gets the v3 schema, `user_version = 3` and WAL; an existing
+schema v2 or v3 file (that `user_version`, at least one of the four tables and no other table;
+views, indexes and triggers of the user's own are fine) is checked table by table against its
+own version; any other file (the legacy `species.db`, a later schema, another application's
+database that also uses `user_version` 2 or 3, one holding only views/indexes/triggers, not
+SQLite at all) raises `RecorderSchemaError` before a single PRAGMA or DDL statement is written
+to it. A path SQLite
 cannot open, read or write (a directory; a file without read or write permission; a file, new
 or not, in a folder that cannot be written, where SQLite keeps its journal), or a file another
 process holds locked, raises `RecorderOpenError` — while the Recorder opens, not at the first
@@ -40,16 +49,16 @@ if TYPE_CHECKING:
     from latticelife.core.lifeform import Lifeform
     from latticelife.session.session import GenerationRecord
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # what a new file gets
 
-_SCHEMA = """
+_SCHEMA_TEMPLATE = """
 CREATE TABLE IF NOT EXISTS session_metadata (
   session_id TEXT PRIMARY KEY,
   started_at TEXT DEFAULT (datetime('now')),
   grid_width INTEGER, grid_height INTEGER,
   shape TEXT, triangle_mode TEXT, wrap INTEGER,
   initial_alive_percentage REAL, n_lifeforms INTEGER,
-  seed INTEGER, planned_generations INTEGER
+  seed INTEGER, planned_generations INTEGER{session_extra}
 );
 CREATE TABLE IF NOT EXISTS lifeform_meta (
   session_id TEXT, lifeform INTEGER,
@@ -59,7 +68,7 @@ CREATE TABLE IF NOT EXISTS lifeform_meta (
 CREATE TABLE IF NOT EXISTS generation_metrics (
   session_id TEXT, generation INTEGER,
   total_alive INTEGER, changed_cells INTEGER,
-  volatility REAL, entropy REAL,
+  volatility REAL, entropy REAL,{generation_extra}
   PRIMARY KEY (session_id, generation)
 );
 CREATE TABLE IF NOT EXISTS life_records (
@@ -71,10 +80,34 @@ CREATE TABLE IF NOT EXISTS life_records (
   PRIMARY KEY (session_id, generation, lifeform)
 );
 """
-
-_INSERT_GENERATION_METRICS = """INSERT INTO generation_metrics
+# The schema of every version a file may have. A file is checked against, and completed with,
+# the DDL of its own version.
+_SCHEMAS: dict[int, str] = {
+    2: _SCHEMA_TEMPLATE.format(session_extra="", generation_extra=""),
+    3: _SCHEMA_TEMPLATE.format(
+        session_extra=",\n  tie_break TEXT, tie_break_radius INTEGER, tie_break_power REAL",
+        generation_extra="\n  contested INTEGER,",
+    ),
+}
+_SESSION_COLUMNS = (
+    "session_id, grid_width, grid_height, shape, triangle_mode, wrap, "
+    "initial_alive_percentage, n_lifeforms, seed, planned_generations"
+)
+_INSERT_SESSION: dict[int, str] = {
+    2: f"INSERT INTO session_metadata ({_SESSION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    3: f"""INSERT INTO session_metadata
+   ({_SESSION_COLUMNS}, tie_break, tie_break_radius, tie_break_power)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+}
+# A generation is buffered with its contested count last; a v2 file's insert leaves it out.
+_INSERT_GENERATION_METRICS: dict[int, str] = {
+    2: """INSERT INTO generation_metrics
    (session_id, generation, total_alive, changed_cells, volatility, entropy)
-   VALUES (?, ?, ?, ?, ?, ?)"""
+   VALUES (?, ?, ?, ?, ?, ?)""",
+    3: """INSERT INTO generation_metrics
+   (session_id, generation, total_alive, changed_cells, volatility, entropy, contested)
+   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+}
 _INSERT_LIFE_RECORDS = """INSERT INTO life_records
    (session_id, generation, lifeform, alive, static, births, deaths, kills,
     dominance, growth_rate, mobility, avg_lifespan,
@@ -86,8 +119,10 @@ _PendingGeneration = tuple[tuple, list[tuple]]
 
 
 class RecorderSchemaError(ValueError):
-    """The DB file is not a LatticeLife schema v2 database (or not SQLite). Raised before
-    anything has been written to the file."""
+    """The DB file is not a LatticeLife schema v2 or v3 database (or not SQLite): raised before
+    anything has been written to the file. Or it is a schema v2 file asked to record a session
+    it has no column for (a tie-break other than the random draw): raised before that session
+    is written."""
 
 
 class RecorderOpenError(ValueError):
@@ -106,12 +141,12 @@ _NOT_OPENABLE = frozenset(
 
 
 @functools.cache
-def _schema_columns() -> dict[str, tuple[str, ...]]:
-    """Column names of each v2 table, read from `_SCHEMA` itself so the check below can never
-    drift from the DDL."""
+def _schema_columns(version: int) -> dict[str, tuple[str, ...]]:
+    """Column names of each table of schema `version`, read from its DDL itself so the check
+    below can never drift from it."""
     conn = sqlite3.connect(":memory:")
     try:
-        conn.executescript(_SCHEMA)
+        conn.executescript(_SCHEMAS[version])
         query = "SELECT name FROM sqlite_master WHERE type='table'"
         tables = [row[0] for row in conn.execute(query)]
         return {
@@ -142,6 +177,8 @@ class Recorder:
         self._connection: sqlite3.Connection | None = None
         self._pending: list[_PendingGeneration] = []
         self._pending_life_rows = 0
+        # The file's schema version, known once it is open: SCHEMA_VERSION for a new file.
+        self.schema_version = SCHEMA_VERSION
 
     def __enter__(self) -> Recorder:
         try:
@@ -205,8 +242,9 @@ class Recorder:
         return None
 
     def _prepare_schema(self, conn: sqlite3.Connection) -> None:
-        """Create the v2 schema in a new/empty file, or verify an existing v2 file. Everything
-        that writes (WAL, DDL, user_version) happens only after the checks pass."""
+        """Create the current schema in a new/empty file, or verify an existing v2 or v3 file
+        against its own version. Everything that writes (WAL, DDL, user_version) happens only
+        after the checks pass."""
         try:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             # Every schema object, not just tables: a file holding only views, indexes or
@@ -219,15 +257,18 @@ class Recorder:
             raise RecorderSchemaError(
                 f"{self.db_path} is not a SQLite database ({exc}); refusing to use it"
             ) from None
+        self.schema_version = SCHEMA_VERSION
         if version != 0 or objects:
-            self._check_v2_schema(conn, version, objects)
+            self._check_schema(conn, version, objects)
+            self.schema_version = version  # an existing file keeps the version it has
 
         try:
             conn.execute("PRAGMA journal_mode = WAL")
-            # Adds any v2 table the file is missing. Setting user_version, even to the value it
-            # has, is a write: a file SQLite could open only for reading fails here.
+            # Adds any table of its version the file is missing. Setting user_version, even to
+            # the value it has, is a write: a file SQLite could open only for reading fails here.
             conn.executescript(
-                f"BEGIN IMMEDIATE; {_SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+                f"BEGIN IMMEDIATE; {_SCHEMAS[self.schema_version]} "
+                f"PRAGMA user_version = {self.schema_version}; COMMIT;"
             )
         except sqlite3.OperationalError as exc:
             if conn.in_transaction:
@@ -237,50 +278,53 @@ class Recorder:
                 raise
             raise access_error from None
 
-    def _check_v2_schema(
+    def _check_schema(
         self, conn: sqlite3.Connection, version: int, objects: list[tuple[str, str]]
     ) -> None:
-        """Raise RecorderSchemaError unless this non-empty file is a LatticeLife schema v2
-        database."""
+        """Raise RecorderSchemaError unless this non-empty file is a LatticeLife schema v2 or
+        v3 database, with the tables of the version it says it is."""
         tables = {
             name for kind, name in objects if kind == "table" and not name.startswith("sqlite_")
         }
-        # user_version 2 alone does not make a file ours: other applications version their own
-        # schemas with it too. Ours holds at least one v2 table and no table of anyone else's.
-        v2_tables = set(_schema_columns())
-        foreign = sorted(tables - v2_tables)
-        if version != SCHEMA_VERSION or foreign or not tables & v2_tables:
+        # A user_version of ours alone does not make a file ours: other applications version
+        # their own schemas with 2 and 3 too. Ours holds at least one of our tables (their names
+        # are the same in every version) and no table of anyone else's.
+        our_tables = set(_schema_columns(SCHEMA_VERSION))
+        foreign = sorted(tables - our_tables)
+        versions = " or ".join(f"v{v}" for v in sorted(_SCHEMAS))
+        if version not in _SCHEMAS or foreign or not tables & our_tables:
             others = sorted(f"{kind} {name}" for kind, name in objects if kind != "table")
-            not_v2 = (  # which ones, when v2 tables and others are mixed
-                f"; not schema v{SCHEMA_VERSION} tables: {', '.join(foreign)}"
-                if version == SCHEMA_VERSION and foreign and tables & v2_tables
+            not_ours = (  # which ones, when our tables and others are mixed
+                f"; not schema v{version} tables: {', '.join(foreign)}"
+                if version in _SCHEMAS and foreign and tables & our_tables
                 else ""
             )
             raise RecorderSchemaError(
-                f"{self.db_path} is not a LatticeLife schema v{SCHEMA_VERSION} database "
-                f"(user_version={version}, tables: {', '.join(sorted(tables)) or 'none'}{not_v2}"
+                f"{self.db_path} is not a LatticeLife schema {versions} database "
+                f"(user_version={version}, tables: {', '.join(sorted(tables)) or 'none'}{not_ours}"
                 f"{'; other objects: ' + ', '.join(others) if others else ''}); "
                 "refusing to modify it. Record into a new file instead (autorun --db)."
             )
-        # The user's own views and indexes are fine, but not under a v2 table's name: CREATE
-        # TABLE IF NOT EXISTS would then fail on it, or skip the table and write into the view.
+        # The user's own views and indexes are fine, but not under one of our tables' names:
+        # CREATE TABLE IF NOT EXISTS would then fail on it, or skip the table and write into the
+        # view.
         clashing = sorted(
-            f"{kind} {name}" for kind, name in objects if kind != "table" and name in v2_tables
+            f"{kind} {name}" for kind, name in objects if kind != "table" and name in our_tables
         )
         if clashing:
             raise RecorderSchemaError(
                 f"{self.db_path}: {', '.join(clashing)} takes the name of a schema "
-                f"v{SCHEMA_VERSION} table; refusing to modify it. Record into a new file instead "
+                f"v{version} table; refusing to modify it. Record into a new file instead "
                 "(autorun --db)."
             )
-        for table, expected in _schema_columns().items():
+        for table, expected in _schema_columns(version).items():
             if table not in tables:
                 continue
             actual = tuple(row[1] for row in conn.execute(f"PRAGMA table_info({table})"))
             if actual != expected:
                 raise RecorderSchemaError(
                     f"{self.db_path}: table {table} has columns {', '.join(actual)}, not the "
-                    f"schema v{SCHEMA_VERSION} columns {', '.join(expected)}; refusing to modify it"
+                    f"schema v{version} columns {', '.join(expected)}; refusing to modify it"
                 )
 
     def _conn(self) -> sqlite3.Connection:
@@ -299,26 +343,31 @@ class Recorder:
         if planned_generations < 1:
             raise ValueError(f"planned_generations must be at least 1 (got {planned_generations})")
         conn = self._conn()
+        sim = config.simulation
+        row: tuple = (
+            session_id,
+            config.grid.width,
+            config.grid.height,
+            config.grid.shape,
+            config.grid.triangle_mode,
+            int(config.grid.wrap),
+            sim.initial_alive_percentage,
+            len(lifeforms),
+            seed,
+            planned_generations,
+        )
+        if self.schema_version >= 3:
+            row += (sim.tie_break, sim.tie_break_radius, sim.tie_break_power)
+        elif sim.tie_break != "random":
+            raise RecorderSchemaError(
+                f"{self.db_path} is a schema v2 database, written before the birth tie-break "
+                "was a setting: every session in it drew at random, and it has no column to say "
+                f"otherwise. It cannot record a session with tie_break = {sim.tie_break!r}. "
+                "Record into a new file instead (autorun --db)."
+            )
         # One transaction: a session is recorded with all of its lifeform rows or not at all.
         with conn:
-            conn.execute(
-                """INSERT INTO session_metadata
-                   (session_id, grid_width, grid_height, shape, triangle_mode, wrap,
-                    initial_alive_percentage, n_lifeforms, seed, planned_generations)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    session_id,
-                    config.grid.width,
-                    config.grid.height,
-                    config.grid.shape,
-                    config.grid.triangle_mode,
-                    int(config.grid.wrap),
-                    config.simulation.initial_alive_percentage,
-                    len(lifeforms),
-                    seed,
-                    planned_generations,
-                ),
-            )
+            conn.execute(_INSERT_SESSION[self.schema_version], row)
             conn.executemany(
                 "INSERT INTO lifeform_meta (session_id, lifeform, birth, survive) "
                 "VALUES (?, ?, ?, ?)",
@@ -341,6 +390,7 @@ class Recorder:
             record.grid_metrics.changed_cells,
             record.grid_metrics.volatility,
             record.grid_metrics.entropy,
+            record.grid_metrics.contested,
         )
         life_rows = []
         for lifeform_id, metrics in record.lifeform_metrics.items():
@@ -391,7 +441,11 @@ class Recorder:
         batch, self._pending, self._pending_life_rows = self._pending, [], 0
         committing = False
         try:
-            conn.executemany(_INSERT_GENERATION_METRICS, [row for row, _ in batch])
+            if self.schema_version >= 3:
+                generation_rows = [row for row, _ in batch]
+            else:  # a v2 file has no column for the contested count
+                generation_rows = [row[:-1] for row, _ in batch]
+            conn.executemany(_INSERT_GENERATION_METRICS[self.schema_version], generation_rows)
             conn.executemany(_INSERT_LIFE_RECORDS, [row for _, rows in batch for row in rows])
             committing = True
             conn.commit()

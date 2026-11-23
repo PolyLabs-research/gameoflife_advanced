@@ -33,6 +33,24 @@ documented default (see `observables.no_repeat_before`).
 
 ## Unreleased
 
+- **The birth tie-break is a setting** (`core.lattice.TieBreak`; `simulation.tie_break`,
+  `tie_break_radius`, `tie_break_power`; `ui --tie-break`, `autorun --tie-break`). With several
+  species a dead cell can be due a birth of more than one. `random`, the default, is the rule
+  as it always was, draw for draw. `standoff` leaves the cell empty. `strongest` gives it to
+  the eligible species with the most cells within `tie_break_radius` lattice steps, and to
+  nobody if the top is shared. `weighted` draws with chances in proportion to that count
+  raised to `tie_break_power`: power 0 is `random` draw for draw. With `standoff` or
+  `strongest` the update never draws, so the next grid is a function of the grid whatever
+  the number of species. No kind favours a species by its id, and one species runs the same
+  under all four. The three config keys are optional: a config without them keeps `random`.
+- **Contested cells are counted**: `UpdateResult.contested` and `GridMetrics.contested`, the
+  dead cells more than one species was eligible for in a generation, under every tie-break.
+- **Recorder schema v3.** A new database records each session's tie-break
+  (`session_metadata.tie_break`, `tie_break_radius`, `tie_break_power`) and each generation's
+  contested cells (`generation_metrics.contested`). A schema v2 database is not converted: it
+  is recorded into as before, and since every session in it drew at random and it has no
+  column to say otherwise, it refuses a session with another tie-break (record that one into a
+  new file). `observables.density_series` reads both.
 - **Zooming out** (`experiments.coarse`): block projections of a wrapped square or hexagon
   grid, and the closure test. A block of b sends a W x H grid to the (W / b) x (H / b) grid of
   the same shape (rhombi in axial coordinates on the hexagon, so a supercell's neighbours are

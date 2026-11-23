@@ -17,6 +17,15 @@ n_lifeforms = 1             # 1..10
 static_threshold = 10       # lifespan above which a cell counts as static
 history_limit = 300         # >= alerts.sudden_death_window
 seed = 0                    # 0 = draw fresh entropy; nonzero = reproducible
+# Who is born in a dead cell that two or more species could be born into:
+#   random     one of them, each with the same chance (the rule as it always was)
+#   standoff   nobody: the cell stays empty
+#   strongest  the one with the most cells within tie_break_radius steps; nobody if the top is shared
+#   weighted   a draw, with chances in proportion to that count raised to tie_break_power
+# With standoff or strongest the next grid is a function of the grid alone.
+tie_break = "random"
+tie_break_radius = 2        # 1..4 lattice steps (strongest, weighted)
+tie_break_power = 1.0       # >= 0; 0 gives equal chances (weighted)
 
 [metrics]
 cluster_stride = 10         # compute cluster metrics every N generations (1 = every gen)

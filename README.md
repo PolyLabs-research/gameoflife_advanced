@@ -22,7 +22,8 @@ the runs. See [What has been found with it](#what-has-been-found-with-it).
   triangle grids with 3 (edge) or 12 (edge+vertex), wrapped into a torus or bounded. A shape is
   an adjacency array (`docs/adjacency.md`); the update rule never knows which one it was given.
 - **Up to ten species** on one grid, each with its own outer-totalistic `B/S` rule, competing
-  for cells.
+  for cells. Who is born where two species could be is a setting, the **tie-break**: a random
+  draw, nobody, the locally stronger species, or a draw weighted by local strength.
 - **An interactive app** with live editing by clicking, a population chart per species, alerts
   for a sudden population crash and for stasis, and a 3D view of the wrapped grid on its torus.
 - **Headless instruments.** `autorun` records every generation of batches of sessions to
@@ -200,6 +201,22 @@ An installed (non-editable) `latticelife` command has no checkout: it uses the c
 `$XDG_DATA_HOME/latticelife/out` (default `~/.local/share/latticelife/out`), whichever directory
 it is run from.
 
+**The tie-break.** Each species is born on its own count of neighbours, so with several species
+a dead cell can be due a birth of more than one of them. `simulation.tie_break` says who gets
+it (`ui` and `autorun` also take `--tie-break`):
+
+| `tie_break` | Who is born in a contested cell | The next grid depends on |
+| --- | --- | --- |
+| `random` (the default, and the rule as it always was) | one of the eligible species, each with the same chance | the grid and the random stream |
+| `standoff` | nobody: the cell stays empty | the grid alone |
+| `strongest` | the eligible species with the most cells within `tie_break_radius` steps; nobody if the top is shared | the grid alone |
+| `weighted` | a draw, each species' chance in proportion to that count raised to `tie_break_power` (0 is `random`; a large power approaches `strongest`) | the grid and the random stream |
+
+No kind favours a species by its number. Two species with the same birth rule contest a cell
+with the same neighbour count each, so `strongest` and `weighted` look further than the
+neighbours: `tie_break_radius` (default 2, up to 4) counts every cell within that many steps.
+With one species nothing is ever contested, and every kind gives the same run.
+
 Rules are written `B3/S23`. Once any neighbour count in a rule reaches 10 (12-neighbour
 triangles), all of its counts are comma-separated: `B2,5,8,10/S0,8,12`, `B1,3,4,5,9/S7,9,12`. A
 single count of 10 or more keeps a trailing comma (`B12,/S2,3`) so it cannot be read as two
@@ -209,7 +226,10 @@ digits.
 
 `autorun` records every generation of every session (a sudden-death alert does not end a
 session early). Ctrl+C or SIGTERM stops it with everything recorded so far written and exit
-status 130. It will not write into a `--db` file that is not a LatticeLife schema v2 database.
+status 130. It will not write into a `--db` file that is not a LatticeLife recording database.
+A new database records each session's tie-break and each generation's contested cells. One
+made before the tie-break was a setting is left as it is and takes only sessions that draw at
+random, which is what every session in it did: record another tie-break into a new file.
 
 `discover` keeps one checkpoint per search configuration (shape, triangle mode, `grid_size`,
 `steps`, `freeze_window` and the `[criticality]` settings) under `discovery.checkpoint_path`, so

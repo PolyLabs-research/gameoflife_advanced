@@ -9,7 +9,13 @@ import pytest
 from latticelife.config import load_config
 from latticelife.core.lifeform import Lifeform
 from latticelife.core.rules import Rule, parse_counts
-from latticelife.recording.recorder import Recorder, RecorderOpenError, RecorderSchemaError
+from latticelife.recording.recorder import (
+    _SCHEMAS,
+    SCHEMA_VERSION,
+    Recorder,
+    RecorderOpenError,
+    RecorderSchemaError,
+)
 from latticelife.session.metrics import ClusterMetrics, GridMetrics, LifeformMetrics
 from latticelife.session.session import GenerationRecord, SimulationSession
 
@@ -50,13 +56,13 @@ def _record(generation, lifeform_ids, with_clusters=True):
     )
 
 
-def test_schema_created_with_user_version_2(tmp_path):
+def test_schema_created_with_user_version_3(tmp_path):
     db_path = tmp_path / "test.db"
-    with Recorder(db_path):
-        pass
+    with Recorder(db_path) as recorder:
+        assert recorder.schema_version == SCHEMA_VERSION == 3
 
     conn = sqlite3.connect(db_path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"session_metadata", "lifeform_meta", "generation_metrics", "life_records"} <= tables
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
@@ -239,13 +245,13 @@ def test_legacy_db_is_refused_without_being_modified(tmp_path):
 def test_newer_schema_db_is_refused_and_keeps_its_version(tmp_path):
     db_path = tmp_path / "future.db"
     conn = sqlite3.connect(db_path)
-    conn.executescript("CREATE TABLE session_metadata (id TEXT); PRAGMA user_version = 3;")
+    conn.executescript("CREATE TABLE session_metadata (id TEXT); PRAGMA user_version = 4;")
     conn.close()
 
-    with pytest.raises(RecorderSchemaError, match="user_version=3"), Recorder(db_path):
+    with pytest.raises(RecorderSchemaError, match="user_version=4"), Recorder(db_path):
         pass
 
-    assert _db_state(db_path)[0:2] == (3, ["session_metadata"])
+    assert _db_state(db_path)[0:2] == (4, ["session_metadata"])
     assert _journal_mode(db_path) == "delete"
 
 
@@ -328,7 +334,7 @@ def test_a_view_or_index_named_like_a_v2_table_is_refused_unchanged(tmp_path, dd
     assert not Path(f"{db_path}-wal").exists()
 
 
-def test_v2_db_with_the_users_own_index_view_and_statistics_is_still_ours(tmp_path):
+def test_a_db_with_the_users_own_index_view_and_statistics_is_still_ours(tmp_path):
     """Only tables decide whose a file is: an index, a view or ANALYZE's sqlite_stat1 added to a
     recording for analysis does not lock the user out of recording into it again."""
     db_path = tmp_path / "test.db"
@@ -348,7 +354,7 @@ def test_v2_db_with_the_users_own_index_view_and_statistics_is_still_ours(tmp_pa
         recorder.record_generation("sess-2", _record(1, [1]))
 
     version, tables, rows = _db_state(db_path)
-    assert version == 2
+    assert version == SCHEMA_VERSION
     assert {"session_metadata", "lifeform_meta", "generation_metrics", "life_records"} <= set(
         tables
     )
@@ -510,7 +516,7 @@ def test_existing_empty_file_gets_the_schema(tmp_path):
     with Recorder(db_path):
         pass
     version, tables, _ = _db_state(db_path)
-    assert version == 2
+    assert version == SCHEMA_VERSION
     assert {"session_metadata", "lifeform_meta", "generation_metrics", "life_records"} <= set(
         tables
     )
@@ -525,7 +531,7 @@ def test_non_sqlite_file_is_refused_untouched(tmp_path):
     assert db_path.read_text() == "not a database\n" * 100
 
 
-def test_reopening_a_v2_db_keeps_earlier_sessions(tmp_path):
+def test_reopening_a_db_keeps_earlier_sessions(tmp_path):
     db_path = tmp_path / "test.db"
     for session_id in ("sess-1", "sess-2"):
         with Recorder(db_path) as recorder:
@@ -535,8 +541,146 @@ def test_reopening_a_v2_db_keeps_earlier_sessions(tmp_path):
     conn = sqlite3.connect(db_path)
     assert conn.execute("SELECT COUNT(*) FROM session_metadata").fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM generation_metrics").fetchone()[0] == 2
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     assert _journal_mode(db_path) == "wal"
+
+
+# --- the birth tie-break: schema v3, and schema v2 files as they are ---------------------------
+
+
+def _tie_break_config(kind, radius=2, power=1.0):
+    config = _config()
+    simulation = replace(
+        config.simulation, tie_break=kind, tie_break_radius=radius, tie_break_power=power
+    )
+    return replace(config, simulation=simulation)
+
+
+def _schema_v2_file(db_path, sessions=("old-1",)):
+    """A database as LatticeLife wrote it before schema v3, holding `sessions`."""
+    conn = sqlite3.connect(db_path)
+    conn.executescript(_SCHEMAS[2] + "PRAGMA user_version = 2; PRAGMA journal_mode = WAL;")
+    for session_id in sessions:
+        conn.execute(
+            "INSERT INTO session_metadata (session_id, grid_width, grid_height, shape, "
+            "triangle_mode, wrap, initial_alive_percentage, n_lifeforms, seed, "
+            "planned_generations) VALUES (?, 50, 50, 'square', 'edge+vertex', 1, 0.5, 1, 7, 1)",
+            (session_id,),
+        )
+        conn.execute(
+            "INSERT INTO generation_metrics VALUES (?, 1, 10, 2, 20.0, 0.5)", (session_id,)
+        )
+    conn.commit()
+    conn.close()
+
+
+def _columns(db_path, table):
+    conn = sqlite3.connect(db_path)
+    try:
+        return [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+    finally:
+        conn.close()
+
+
+def test_a_new_db_records_each_sessions_tie_break_and_each_generations_contests(tmp_path):
+    db_path = tmp_path / "test.db"
+    contested = replace(_record(1, [1, 2]), grid_metrics=GridMetrics(10, 2, 20.0, 0.5, 7))
+    with Recorder(db_path) as recorder:
+        for session_id, config in (
+            ("drawn", _config()),
+            ("level", _tie_break_config("standoff")),
+            ("odds", _tie_break_config("weighted", 3, 2)),
+        ):
+            recorder.start_session(session_id, config, [Lifeform(1, CONWAY)], 2, seed=1)
+        recorder.record_generation("level", contested)
+        recorder.record_generation("level", _record(2, [1, 2]))
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT session_id, tie_break, tie_break_radius, tie_break_power FROM session_metadata "
+        "ORDER BY session_id"
+    ).fetchall()
+    assert rows == [
+        ("drawn", "random", 2, 1.0),
+        ("level", "standoff", 2, 1.0),
+        ("odds", "weighted", 3, 2.0),
+    ]
+    counts = conn.execute("SELECT generation, contested FROM generation_metrics ORDER BY 1")
+    assert counts.fetchall() == [(1, 7), (2, 0)]
+    conn.close()
+    assert _columns(db_path, "session_metadata")[-3:] == [
+        "tie_break",
+        "tie_break_radius",
+        "tie_break_power",
+    ]
+
+
+def test_a_schema_v2_db_stays_v2_and_takes_sessions_that_draw_at_random(tmp_path):
+    db_path = tmp_path / "old.db"
+    _schema_v2_file(db_path)
+    columns = {t: _columns(db_path, t) for t in ("session_metadata", "generation_metrics")}
+    with Recorder(db_path) as recorder:
+        assert recorder.schema_version == 2
+        recorder.start_session("new-1", _config(), [Lifeform(1, CONWAY)], 1, seed=1)
+        recorder.record_generation("new-1", _record(1, [1]))
+
+    assert _db_state(db_path)[0] == 2
+    assert {t: _columns(db_path, t) for t in columns} == columns  # nothing was added to it
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM session_metadata").fetchone()[0] == 2
+    rows = conn.execute("SELECT * FROM generation_metrics ORDER BY session_id").fetchall()
+    assert rows == [("new-1", 1, 10, 2, 20.0, 0.5), ("old-1", 1, 10, 2, 20.0, 0.5)]
+    conn.close()
+
+
+@pytest.mark.parametrize("kind", ["standoff", "strongest", "weighted"])
+def test_a_schema_v2_db_refuses_a_session_with_another_tie_break(tmp_path, kind):
+    """Every session in a v2 file drew at random and no column says otherwise, so one that did
+    not would be read as if it had. It is refused before anything of it is written."""
+    db_path = tmp_path / "old.db"
+    _schema_v2_file(db_path)
+    with Recorder(db_path) as recorder:
+        with pytest.raises(RecorderSchemaError, match=f"tie_break = '{kind}'.*new file"):
+            recorder.start_session("new-1", _tie_break_config(kind), [Lifeform(1, CONWAY)], 1, 1)
+        # the same file still takes a session that draws at random
+        recorder.start_session("new-2", _config(), [Lifeform(1, CONWAY)], 1, seed=1)
+
+    conn = sqlite3.connect(db_path)
+    ids = [row[0] for row in conn.execute("SELECT session_id FROM session_metadata ORDER BY 1")]
+    assert ids == ["new-2", "old-1"]
+    assert conn.execute("SELECT COUNT(*) FROM lifeform_meta").fetchone()[0] == 1
+    conn.close()
+
+
+def test_a_db_is_checked_against_the_version_it_says_it_is(tmp_path):
+    """A v3 label on v2 tables, or a v2 label on v3 tables, is not a file of ours."""
+    relabelled = tmp_path / "relabelled.db"
+    _schema_v2_file(relabelled)
+    conn = sqlite3.connect(relabelled)
+    conn.execute("PRAGMA user_version = 3")
+    conn.close()
+    with pytest.raises(RecorderSchemaError, match="not the schema v3 columns"):
+        Recorder(relabelled).__enter__()
+
+    downgraded = tmp_path / "downgraded.db"
+    with Recorder(downgraded):
+        pass
+    conn = sqlite3.connect(downgraded)
+    conn.execute("PRAGMA user_version = 2")
+    conn.close()
+    with pytest.raises(RecorderSchemaError, match="not the schema v2 columns"):
+        Recorder(downgraded).__enter__()
+
+
+def test_a_schema_v2_db_missing_a_table_gets_the_v2_table(tmp_path):
+    db_path = tmp_path / "partial.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(f"{_V2_GENERATION_METRICS} PRAGMA user_version = 2;")
+    conn.close()
+    with Recorder(db_path) as recorder:
+        assert recorder.schema_version == 2
+    assert "tie_break" not in _columns(db_path, "session_metadata")
+    assert _columns(db_path, "generation_metrics")[-1] == "entropy"
 
 
 def test_start_session_rejects_a_plan_without_generations(tmp_path):

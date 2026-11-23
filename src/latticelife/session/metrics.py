@@ -18,6 +18,7 @@ class GridMetrics:
     changed_cells: int
     volatility: float
     entropy: float
+    contested: int = 0  # cells the birth tie-break settled this generation
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ def compute_grid_metrics(result: UpdateResult) -> GridMetrics:
         changed_cells=result.changed_cells,
         volatility=volatility,
         entropy=entropy,
+        contested=result.contested,
     )
 
 

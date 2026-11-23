@@ -16,6 +16,7 @@ from latticelife.config import (
     project_root_for,
     user_data_dir,
 )
+from latticelife.core.lattice import TieBreak
 from latticelife.discovery import es
 
 REPO_DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config" / "default.toml"
@@ -95,6 +96,14 @@ BAD_VALUES = [
     ("simulation.history_limit", 0, "simulation.history_limit"),
     ("simulation.history_limit", 5, "alerts.sudden_death_window"),
     ("simulation.seed", -1, "simulation.seed"),
+    ("simulation.tie_break", "coin", "simulation.tie_break must be one of random, standoff"),
+    ("simulation.tie_break", 1, "simulation.tie_break must be a string"),
+    ("simulation.tie_break_radius", 0, "simulation.tie_break_radius"),
+    ("simulation.tie_break_radius", 5, "simulation.tie_break_radius"),
+    ("simulation.tie_break_radius", 2.0, "simulation.tie_break_radius must be an integer"),
+    ("simulation.tie_break_power", -0.5, "simulation.tie_break_power"),
+    ("simulation.tie_break_power", math.inf, "simulation.tie_break_power"),
+    ("simulation.tie_break_power", math.nan, "simulation.tie_break_power"),
     ("metrics.cluster_stride", 0, "metrics.cluster_stride"),
     ("alerts.sudden_death_window", 0, "alerts.sudden_death_window"),
     ("alerts.sudden_death_drop", 0, "alerts.sudden_death_drop"),
@@ -185,6 +194,20 @@ def test_an_integer_beyond_float_range_is_rejected_naming_the_key(tmp_path):
     data = _with(_default_data(), "criticality.weights.damage", 10**400)
     with pytest.raises(ConfigError, match=r"criticality\.weights\.damage must be a number within"):
         load_config(_write_config(tmp_path, data))
+
+
+def test_the_tie_break_keys_are_optional_and_default_to_the_random_draw(tmp_path):
+    """A config written before the setting existed keeps the rule it always had."""
+    shipped = load_config(REPO_DEFAULT_CONFIG).simulation
+    assert shipped.tie_break_rule() == TieBreak("random", 2, 1.0)
+    data = _default_data()
+    for key in ("tie_break", "tie_break_radius", "tie_break_power"):
+        del data["simulation"][key]
+    old = load_config(_write_config(tmp_path, data)).simulation
+    assert old == shipped and old.tie_break_rule() == TieBreak()
+    chosen = _with(_with(data, "simulation.tie_break", "weighted"), "simulation.tie_break_power", 3)
+    rule = load_config(_write_config(tmp_path, chosen, "chosen.toml")).simulation.tie_break_rule()
+    assert rule == TieBreak("weighted", 2, 3.0) and type(rule.power) is float
 
 
 def test_unknown_key_is_rejected(tmp_path):

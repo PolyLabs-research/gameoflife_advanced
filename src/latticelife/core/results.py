@@ -15,3 +15,6 @@ class UpdateResult:
     alive: np.ndarray  # (L+1,)
     static: np.ndarray  # (L+1,) lifespan > static_threshold
     changed_cells: int
+    # Dead cells that more than one species could have been born into this generation: the
+    # cells the tie-break settled (`core.lattice.TieBreak`). Always 0 with one species.
+    contested: int = 0
