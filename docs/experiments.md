@@ -219,6 +219,51 @@ second pass holds P grids). `run_local` writes one resumable JSONL record per ru
 `experiments.cost` prices a task before it runs: generations times cells (a cap, so an upper
 bound), and seconds from `measure_seconds_per_step` on this machine.
 
+## Zooming out
+
+`experiments.coarse` asks what a rule does at a larger scale. Replace each block of b x b cells
+by one supercell, count `clock` generations as one coarse generation, and test whether a rule on
+the supercells predicts the zoomed-out run. The **closure test** takes two routes from one
+start: run the fine world for s x clock generations and then project, or project the start and
+run the coarse world for s generations. It counts the supercells where they differ, for
+s = 1, 2, ...
+
+```python
+from latticelife.experiments.coarse import ClosureTask, closure_point
+
+# B1357/S1357 on a 60 x 60 torus, zoomed out by 4 with the clock slowed by 4, against the same
+# rule on the 15 x 15 torus; eight coarse generations from the start that seed 1 names.
+record = closure_point(ClosureTask("B1357/S1357", "square", 60, block=4, clock=4, seed=1, steps=8))
+record.mismatches   # [0, 0, 0, 0, 0, 0, 0, 0]: a parity rule is its own coarse rule
+record.live         # the live supercells at each coarse generation, of 225
+```
+
+- **Blocks.** A block of b sends a wrapped W x H grid to the wrapped (W / b) x (H / b) grid of
+  the same shape (`coarse_grid`), so a coarse world can run what a projection reads. On the
+  hexagon the blocks are rhombi in axial coordinates, and a supercell's six neighbours are b
+  steps from it on the fine grid, in the same six directions. b must divide both sides, and the
+  coarse grid must be one that can wrap. The triangle lattice has no blocks yet.
+- **Projections.** `decimate` keeps the cell at a fixed place in each block, `parity` the sum
+  mod 2 of the block, `identity` the grid itself. For a grid of several species,
+  `block_counts` gives each species' cells per block and `leading_species` the species with the
+  most (none where the top is shared).
+- **Worlds.** A world is a B/S rule on a wrapped grid, with one species, so a run is a function
+  of its start. `dilation=k` puts every neighbour k lattice steps away
+  (`build_adjacency(..., dilation=k)`): a different adjacency array for the same update rule.
+- **Starts.** `uniform_start(shape, grid, seed)` makes every configuration equally likely
+  (each cell alive with probability one half, independently). A session's own seeding fixes
+  the number of live cells instead, which is a different distribution.
+- **Records.** `run_closure` writes one resumable JSONL record per test: the task, the
+  mismatches and the live supercells per coarse generation, and the sha256 of the start and of
+  the fine grid at the end, so a record can be checked on another machine.
+
+What the count means is known for the parity rules (B1357/S1357 and B1357/S02468 on the square,
+B135/S135 and B135/S0246 on the hexagon). With block = clock = 2^j and the same rule on the
+coarse grid it is zero from every start; so is 2^j generations against one generation at
+`dilation=2^j`, cell for cell. Where the scales do not match, every supercell differs with
+probability exactly one half from a uniform start. For any other rule the count is a
+measurement: Conway's Life is not its own coarse rule, and the test says so at once.
+
 ## Caveats
 
 - Everything here is single-species. With several species the birth tie-break is random, a

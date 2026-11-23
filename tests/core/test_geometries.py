@@ -283,3 +283,122 @@ def test_triangle_adjacency_matches_the_drawn_tiling(triangle_mode, shared_corne
             if j != i and len(corners[i] & corners[j]) >= shared_corners
         }
         assert neighbours == touching, cells[i]
+
+
+# --- the vectorised wrapped builder, and dilation ------------------------------------------------
+
+
+@pytest.mark.parametrize(("shape", "triangle_mode", "_deg"), SHAPES)
+def test_a_wrapped_grid_is_built_exactly_as_the_per_cell_loops_build_it(shape, triangle_mode, _deg):
+    """`_wrapped_adjacency` against `_neighbor_lists`: the same cells, in the same order."""
+    min_width, min_height = min_wrap_size(shape, triangle_mode)
+    compared = 0
+    for width in range(min_width, min_width + 9):
+        for height in range(min_height, min_height + 9):
+            try:
+                validate_dimensions(shape, width, height, True, triangle_mode)
+            except ValueError:
+                continue
+            built = build_adjacency(shape, width, height, True, triangle_mode)
+            lists = _raw_neighbor_lists(shape, triangle_mode, width, height)
+            assert built.dtype == np.int32 and built.tolist() == lists, (width, height)
+            compared += 1
+    assert compared >= 16
+
+
+def _hex_displacement(i: int, j: int, width: int, height: int) -> tuple[float, float]:
+    """From cell i's centre to the nearest image of cell j's, on the wrapped hexagon grid."""
+    (xi, yi), (xj, yj) = _hex_centre(*divmod(i, width)), _hex_centre(*divmod(j, width))
+    period_x, period_y = 1.5 * width, math.sqrt(3) * height
+    dx = (xj - xi + period_x / 2) % period_x - period_x / 2
+    dy = (yj - yi + period_y / 2) % period_y - period_y / 2
+    return dx, dy
+
+
+def _is_whole_number_of(period: float, length: float) -> bool:
+    turns = length / period
+    return math.isclose(turns, round(turns), abs_tol=1e-9)
+
+
+@pytest.mark.parametrize("dilation", [2, 3, 4])
+def test_a_dilated_hexagon_neighbour_lies_that_many_steps_along_the_same_direction(dilation):
+    """In the drawn tiling: the neighbour at dilation k is at k times the plain neighbour's
+    displacement (up to the torus's periods), for every cell and each of its six directions."""
+    width, height = 20, 18
+    plain = build_adjacency("hexagon", width, height, True)
+    far = build_adjacency("hexagon", width, height, True, dilation=dilation)
+    assert far.shape == plain.shape and far.dtype == plain.dtype
+    for i in range(width * height):
+        for slot in range(6):
+            dx, dy = _hex_displacement(i, int(plain[i, slot]), width, height)
+            fx, fy = _hex_displacement(i, int(far[i, slot]), width, height)
+            assert _is_whole_number_of(1.5 * width, fx - dilation * dx), (i, slot)
+            assert _is_whole_number_of(math.sqrt(3) * height, fy - dilation * dy), (i, slot)
+
+
+@pytest.mark.parametrize("dilation", [2, 3, 5])
+def test_a_dilated_square_neighbour_is_that_many_single_steps(dilation):
+    width, height = 11, 9
+    plain = build_adjacency("square", width, height, True)
+    far = build_adjacency("square", width, height, True, dilation=dilation)
+    for slot in range(8):
+        walked = np.arange(width * height)
+        for _ in range(dilation):
+            walked = plain[walked, slot]
+        assert np.array_equal(far[:, slot], walked)
+
+
+@pytest.mark.parametrize("shape", ["square", "hexagon"])
+def test_a_dilated_adjacency_is_mutual_and_may_list_a_cell_twice(shape):
+    """Each link is returned as often as it is given. Narrower than the dilated stencil, the
+    grid folds neighbours together: on 8 x 8 at dilation 4, opposite neighbours coincide."""
+    far = build_adjacency(shape, 12, 12, True, dilation=4)
+    for i, row in enumerate(far.tolist()):
+        for j in set(row):
+            assert row.count(j) == far[j].tolist().count(i)
+    folded = build_adjacency(shape, 8, 8, True, dilation=4)
+    assert all(len(set(row)) < len(row) for row in folded.tolist())
+
+
+def test_dilation_one_is_the_default_and_bad_dilations_are_refused():
+    for shape, mode, _ in SHAPES:
+        assert np.array_equal(
+            build_adjacency(shape, 12, 12, True, mode, dilation=1),
+            build_adjacency(shape, 12, 12, True, mode),
+        )
+    with pytest.raises(ValueError, match="triangle"):
+        build_adjacency("triangle", 12, 12, True, "edge", dilation=2)
+    with pytest.raises(ValueError, match="wrapped"):
+        build_adjacency("square", 12, 12, False, dilation=2)
+    with pytest.raises(ValueError, match="even width"):
+        build_adjacency("hexagon", 11, 12, True, dilation=2)
+    for bad in (0, -1, 1.5, True):
+        with pytest.raises(ValueError, match="dilation"):
+            build_adjacency("square", 12, 12, True, dilation=bad)
+
+
+@pytest.mark.parametrize(
+    ("shape", "rule"),
+    [("square", "B1357/S1357"), ("square", "B1357/S02468"), ("hexagon", "B135/S135")],
+)
+@pytest.mark.parametrize("dilation", [2, 4])
+def test_a_parity_rules_2_to_the_k_generations_are_one_on_the_dilated_grid(shape, rule, dilation):
+    """Frobenius over GF(2), on the update rule itself: f^(2^k) is f with neighbours 2^k apart."""
+    width, height = 12, 10
+    lifeform = [Lifeform(1, Rule.from_bs_string(rule))]
+    plain = LatticeGrid(lifeform, shape, width, height, True)
+    far = LatticeGrid(
+        lifeform,
+        shape,
+        width,
+        height,
+        True,
+        adjacency=build_adjacency(shape, width, height, True, dilation=dilation),
+    )
+    rng = np.random.default_rng(5)
+    start = rng.integers(0, 2, width * height).astype(np.int8)
+    plain.occupancy, far.occupancy = start.copy(), start.copy()
+    for _ in range(dilation):
+        plain.step(rng)
+    far.step(rng)
+    assert np.array_equal(plain.occupancy, far.occupancy) and 0 < plain.occupancy.sum()

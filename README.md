@@ -35,6 +35,8 @@ the runs. See [What has been found with it](#what-has-been-found-with-it).
   sweeps, census, damage, and observables. The observables cover settling times, survival, event
   times (exact or censored), whole damage curves per seed, object sizes, counts over time, and
   local transients (when each block of the torus enters the soup's final cycle).
+  `experiments.coarse` zooms out: block projections of a torus, and a closure test of whether
+  a rule on the blocks predicts the zoomed-out run.
   The names are pinned by tests, and any change to them is noted in `docs/CHANGELOG.md`.
 
 ## Screenshots

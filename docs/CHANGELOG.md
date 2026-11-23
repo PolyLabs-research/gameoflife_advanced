@@ -23,6 +23,9 @@ here, under the version that makes it.
 - `experiments.cost`: `CostHint`, `cost_hint`, `task_cost`, `measure_seconds_per_step`
 - `experiments.series`: `count_series`
 - `experiments.local`: `LocalTask`, `LocalRecord`, `local_point`, `run_local`, `RECORD_KEY`
+- `experiments.coarse`: `coarse_grid`, `sample_cells`, `block_cells`, `Projection`, `project`,
+  `block_counts`, `leading_species`, `World`, `Diagram`, `Closure`, `closure`, `uniform_start`,
+  `ClosureTask`, `ClosureRecord`, `closure_point`, `run_closure`, `RECORD_KEY`
 
 Record files are append-only JSONL. A new field may be added to a record; an existing field is
 never renamed, retyped or given a new meaning. Readers treat a missing new field as its
@@ -30,6 +33,27 @@ documented default (see `observables.no_repeat_before`).
 
 ## Unreleased
 
+- **Zooming out** (`experiments.coarse`): block projections of a wrapped square or hexagon
+  grid, and the closure test. A block of b sends a W x H grid to the (W / b) x (H / b) grid of
+  the same shape (rhombi in axial coordinates on the hexagon, so a supercell's neighbours are
+  b steps away on the fine grid). `project` reads a coarse configuration off a one-species
+  one (a sampled cell, or a block's parity); `block_counts` and `leading_species` read a grid
+  of several species. `closure` runs the fine world then projects, or projects then runs a
+  coarse world, and counts the supercells where the two differ. `closure_point` and
+  `run_closure` give resumable JSONL records, each naming its start by seed (`uniform_start`:
+  every configuration equally likely) and carrying the sha256 of the start and of the fine
+  grid it ended on. A parity rule is its own coarse rule at every power of two, which the
+  tests use as the known answer; lattice-lab's `examples/scale-up-linear` registered and
+  confirmed it, and five of its records are reproduced in the tests to the last bit.
+- **Dilated adjacency** (`core.geometries.build_adjacency(..., dilation=k)`): the same lattice
+  with every neighbour k lattice steps away, on a wrapped square or hexagon grid. Where a far
+  neighbour wraps onto another it is listed twice and counted twice. The default, 1, is the
+  adjacency as before.
+- **Wrapped grids are built without per-cell loops.** `build_adjacency` now fills a wrapped
+  grid's array in whole-array operations: the same array as before, cell for cell and in the
+  same neighbour order (the tests compare the two on every shape), about fifteen times faster
+  at 512 x 512, and without the per-cell Python lists, which a grid of several thousand cells a
+  side would need gigabytes for. Clamped grids are built as before.
 - **Local transients** (`experiments.local`): when each b x b block of the grid enters the
   soup's final cycle. A second pass compares every state with the one a period earlier; a
   block's local transient is one past the last generation it differed. The largest is the

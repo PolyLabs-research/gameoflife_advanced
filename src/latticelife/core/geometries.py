@@ -17,6 +17,19 @@ symmetry invariant breaks. A wrapped grid narrower than the neighbor stencil fol
 each other (a cell becomes its own neighbor, or one neighbor is counted twice).
 `validate_dimensions()` rejects both; `build_adjacency()` calls it, and config loading and the
 settings panel call it to report the problem before anything is built.
+
+A wrapped grid's array is built in whole-array numpy operations (`_wrapped_adjacency`), cell for
+cell and in the same neighbour order as the per-cell loops (`_neighbor_lists`), which remain for
+clamped grids and as the reference the tests compare against.
+
+`build_adjacency(..., dilation=k)` gives the same lattice with every neighbour k lattice steps
+away instead of one: on the square the offsets times k, on the hexagon the six axial steps times
+k (in axial coordinates (q, r) = (c, row - floor(c / 2)) the odd-q grid's neighbours are the
+steps +-(1, 0), +-(0, 1), +-(1, -1), and the wrapped W x H grid is Z^2 / <(W, -W/2), (0, H)>).
+It is the adjacency of the rule's 2^j-th iterate for a parity rule, and of the coarse grid seen
+from the fine one (`experiments.coarse`). A dilated grid is not checked against the stencil's
+width: where a far neighbour wraps onto another, it is listed twice and counted twice. The
+triangle lattice has no dilated adjacency here.
 """
 
 from __future__ import annotations
@@ -224,14 +237,84 @@ def _pack(neighbor_lists: list[list[int]], degree: int) -> np.ndarray:
     return adjacency
 
 
+def _wrapped_classes(
+    shape: str, triangle_mode: str
+) -> tuple[tuple[tuple[tuple[int, int], ...], ...], Callable[[np.ndarray, np.ndarray], np.ndarray]]:
+    """A wrapped grid's offset lists, one per class of cell and each in the order
+    `_neighbor_lists` visits it, and the function giving every cell's class from its row and
+    column."""
+    if shape == "square":
+        return (_SQUARE_OFFSETS,), lambda rows, cols: np.zeros_like(rows)
+    if shape == "hexagon":
+        return (_HEX_EVEN_OFFSETS, _HEX_ODD_OFFSETS), lambda rows, cols: cols % 2
+    if shape == "triangle":
+        offsets_up, offsets_down = _triangle_offsets(triangle_mode)
+        return (tuple(offsets_up), tuple(offsets_down)), lambda rows, cols: (rows + cols) % 2
+    raise ValueError(f"Unsupported grid shape: {shape}")
+
+
+def _wrapped_adjacency(
+    shape: str, width: int, height: int, triangle_mode: str, dilation: int = 1
+) -> np.ndarray:
+    """The adjacency array of a wrapped grid, without the per-cell loops. At dilation 1 it is
+    `_pack(_neighbor_lists(...))` exactly, in values and in the order of each cell's neighbours
+    (the tests compare them on every shape). On the hexagon the neighbours are reached through
+    axial coordinates, so that `dilation` steps along a lattice direction stay on that
+    direction; the row is taken from the unreduced column, (q + W, r - W/2) being the cell
+    (q, r)."""
+    classes, class_of = _wrapped_classes(shape, triangle_mode)
+    rows, cols = np.divmod(np.arange(width * height), width)
+    cell_class = class_of(rows, cols)
+    adjacency = np.empty((width * height, len(classes[0])), dtype=np.int32)
+    for index, offsets in enumerate(classes):
+        mask = cell_class == index
+        r, c = rows[mask], cols[mask]
+        for k, (dr, dc) in enumerate(offsets):
+            if shape == "hexagon":
+                # this class's column parity is `index`; the offset as an axial step
+                dq, da = dc, dr - (index + dc) // 2
+                q = c + dilation * dq
+                nr, nc = (r - c // 2) + dilation * da + q // 2, q
+            else:
+                nr, nc = r + dilation * dr, c + dilation * dc
+            adjacency[mask, k] = (nr % height) * width + nc % width
+    return adjacency
+
+
 def build_adjacency(
-    shape: str, width: int, height: int, wrap: bool, triangle_mode: str = "edge+vertex"
+    shape: str,
+    width: int,
+    height: int,
+    wrap: bool,
+    triangle_mode: str = "edge+vertex",
+    dilation: int = 1,
 ) -> np.ndarray:
     """Build the (n_cells, max_degree) int32 adjacency array, padded with -1. Raises
-    ValueError for sizes `validate_dimensions` rejects."""
+    ValueError for sizes `validate_dimensions` rejects.
+
+    `dilation` (default 1) puts every neighbour that many lattice steps away, on a wrapped
+    square or hexagon grid (see the module docstring). Above 1 the grid may be narrower than the
+    dilated stencil: a cell that two far neighbours then land on is listed twice."""
     shape = shape.lower()
     degree = max_degree(shape, triangle_mode)
+    if isinstance(dilation, bool) or int(dilation) != dilation or dilation < 1:
+        raise ValueError(
+            f"A dilation is a whole number of lattice steps, at least 1 (got {dilation!r})."
+        )
+    dilation = int(dilation)
+    if dilation > 1:
+        if shape == "triangle":
+            raise ValueError("The triangle lattice has no dilated adjacency.")
+        if not wrap:
+            raise ValueError("A dilated adjacency needs a wrapped grid.")
+        if width < 1 or height < 1:
+            raise ValueError(f"Grid width and height must be at least 1 (got {width} x {height}).")
+        if shape == "hexagon" and width % 2:
+            raise ValueError(f"A wrapped hexagon grid needs an even width (got {width}).")
+        return _wrapped_adjacency(shape, width, height, triangle_mode, dilation)
     validate_dimensions(shape, width, height, wrap, triangle_mode)
+    if wrap:
+        return _wrapped_adjacency(shape, width, height, triangle_mode)
 
     offset_fn: OffsetFn
     if shape == "square":
