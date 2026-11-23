@@ -23,6 +23,8 @@ here, under the version that makes it.
 - `experiments.cost`: `CostHint`, `cost_hint`, `task_cost`, `measure_seconds_per_step`
 - `experiments.series`: `count_series`
 - `experiments.local`: `LocalTask`, `LocalRecord`, `local_point`, `run_local`, `RECORD_KEY`
+- `experiments.competition`: `CompetitionTask`, `CompetitionRecord`, `competition_point`,
+  `run_competition`, `species_start`, `pair_counts`, `RECORD_KEY`
 - `experiments.coarse`: `coarse_grid`, `sample_cells`, `block_cells`, `Projection`, `project`,
   `block_counts`, `leading_species`, `World`, `Diagram`, `Closure`, `closure`, `uniform_start`,
   `ClosureTask`, `ClosureRecord`, `closure_point`, `run_closure`, `RECORD_KEY`
@@ -33,6 +35,16 @@ documented default (see `observables.no_repeat_before`).
 
 ## Unreleased
 
+- **Several species without the app** (`experiments.competition`): the first experiment that
+  runs more than one species. `species_start` seeds a wrapped grid with a chosen density and
+  chosen shares (every cell independently); `competition_point` runs it under a named
+  tie-break and records, at the start, every `sample_every`-th generation and the end, each
+  species' live cells, the adjacent pairs of two species and of one (how mixed they are),
+  each species' births and the cells the tie-break settled since the sample before, and the
+  generation each species died out. `run_competition` writes resumable JSONL records. A run is
+  reproducible from its task; under `standoff` or `strongest` it is a function of its start.
+  New stable names: `CompetitionTask`, `CompetitionRecord`, `competition_point`,
+  `run_competition`, `species_start`, `pair_counts`.
 - **The birth tie-break is a setting** (`core.lattice.TieBreak`; `simulation.tie_break`,
   `tie_break_radius`, `tie_break_power`; `ui --tie-break`, `autorun --tie-break`). With several
   species a dead cell can be due a birth of more than one. `random`, the default, is the rule

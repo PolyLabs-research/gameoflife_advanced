@@ -38,6 +38,8 @@ the runs. See [What has been found with it](#what-has-been-found-with-it).
   local transients (when each block of the torus enters the soup's final cycle).
   `experiments.coarse` zooms out: block projections of a torus, and a closure test of whether
   a rule on the blocks predicts the zoomed-out run.
+  `experiments.competition` runs several species from a start with chosen shares, under a
+  chosen tie-break, and records what each did.
   The names are pinned by tests, and any change to them is noted in `docs/CHANGELOG.md`.
 
 ## Screenshots

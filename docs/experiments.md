@@ -264,13 +264,46 @@ coarse grid it is zero from every start; so is 2^j generations against one gener
 probability exactly one half from a uniform start. For any other rule the count is a
 measurement: Conway's Life is not its own coarse rule, and the test says so at once.
 
+## Several species
+
+`experiments.competition` runs more than one species without the app. Each species is born and
+survives on the count of its own kind among a cell's neighbours, so the species meet in two
+ways only: a cell holds one of them at a time, and a dead cell that more than one could be born
+into is settled by the tie-break (`simulation.tie_break`; `core.lattice.TieBreak`).
+
+```python
+from latticelife.experiments.competition import CompetitionTask, competition_point
+
+# Conway's Life against HighLife on a 128 x 128 torus, half full, equal shares, 500 generations,
+# sampled every 50; contested cells stay empty.
+record = competition_point(
+    CompetitionTask(("B3/S23", "B36/S23"), "square", 128, 0.5, seed=1, steps=500,
+                    tie_break="standoff", sample_every=50)
+)
+record.alive        # each species' live cells at generations 0, 50, ..., 500
+record.unlike       # adjacent pairs of the two species: few once they have sorted into domains
+record.contested    # cells the tie-break settled since the sample before
+record.extinct_at   # the generation each species died out, or None
+```
+
+- **Starts.** `species_start` makes every cell live with probability `density`, independently,
+  and a live cell species i with probability `shares[i]` (equal when none are given). The
+  number of live cells is not fixed, as it is in a session's own seeding.
+- **Records.** One JSONL record per run from `run_competition`, resumable. A record carries
+  the sha256 of its start and of its last grid.
+- **Reproducible.** The start is drawn from a stream named by the shape, the grid and the seed,
+  and the tie-break's draws from another named by the seed. Under `standoff` or `strongest`
+  nothing is drawn after the start.
+- **One species.** A species alone, or with the others absent, runs exactly as it does with
+  the grid to itself, and its record's counts are that run's.
+
 ## Caveats
 
-- Everything here is single-species. With several species the birth tie-break is random by
-  default, a repeated state then proves nothing, and `run_timeseries(detect_cycles=True)`
-  refuses. With `simulation.tie_break` set to `standoff` or `strongest` a run of several
-  species is a function of its grid again, but these experiments do not run several species
-  yet, and the cycle detector does not tell species apart.
+- Everything but `experiments.competition` is single-species. With several species the birth
+  tie-break is random by default, a repeated state then proves nothing, and
+  `run_timeseries(detect_cycles=True)` refuses. With the tie-break set to `standoff` or
+  `strongest` a run of several species is a function of its grid again, but the cycle detector
+  does not tell species apart, so periods of several species are not measured yet.
 - `unsettled` is relative to the run length: a transient of 1,000 generations on a 32x32 torus
   is not chaos. Compare several `--steps` before calling a rule chaotic, and read
   `no_repeat_before` as a bound on transient + period, never on the transient alone.
